@@ -1,0 +1,7 @@
+node_modules/
+profile/
+chrome-debug/
+*.log
+inventory*.json
+inventory_result*.json
+update_targets*.json

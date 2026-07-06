@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KREAM BOT</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>KREAM BOT</h1>
+
+    <button id="pokemonBtn">
+        🟡 포켓몬 실행
+    </button>
+
+    <button id="onepieceBtn">
+        🔵 원피스 실행
+    </button>
+
+    <button id="allBtn">
+        🚀 전체 실행
+    </button>
+
+    <button id="stopBtn">
+        📜 실시간 로그 중지
+    </button>
+
+    <div class="status">
+        <h2>상태</h2>
+        <div id="status">대기중...</div>
+    </div>
+
+    <div class="log">
+        <h2>로그</h2>
+        <pre id="log"></pre>
+    </div>
+
+    <div class="result-box">
+        <h2>수정 대상</h2>
+
+        <table id="targetTable">
+            <thead>
+                <tr>
+                    <th>상품명</th>
+                    <th>옵션</th>
+                    <th>내 가격</th>
+                    <th>최저가</th>
+                    <th>차이</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+</div>
+
+<script src="script.js"></script>
+
+</body>
+</html>

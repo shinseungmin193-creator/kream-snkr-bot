@@ -1,0 +1,116 @@
+body{
+    margin:0;
+    padding:0;
+    background:#f3f5f7;
+    font-family:Arial, sans-serif;
+}
+
+.container{
+    width:900px;
+    margin:40px auto;
+}
+
+h1{
+    text-align:center;
+    margin-bottom:30px;
+}
+
+button{
+    width:100%;
+    height:60px;
+
+    font-size:20px;
+    font-weight:bold;
+
+    margin-top:15px;
+
+    border:none;
+    border-radius:10px;
+
+    cursor:pointer;
+
+    transition:0.2s;
+}
+
+button:hover{
+    transform:scale(1.02);
+}
+
+button:disabled{
+    opacity:0.65;
+    cursor:not-allowed;
+    transform:none;
+}
+
+#pokemonBtn{
+    background:#ffd54f;
+}
+
+#onepieceBtn{
+    background:#4fc3f7;
+}
+
+#allBtn{
+    background:#66bb6a;
+    color:white;
+}
+
+#stopBtn{
+    background:#e53935;
+    color:white;
+}
+
+#stopBtn:hover{
+    background:#c62828;
+}
+
+.status,
+.log,
+.result-box{
+    background:white;
+
+    border-radius:10px;
+
+    padding:20px;
+
+    margin-top:30px;
+}
+
+#status{
+    font-size:18px;
+
+    color:#2e7d32;
+
+    font-weight:bold;
+}
+
+#log{
+    background:black;
+
+    color:#00ff00;
+
+    padding:15px;
+
+    height:350px;
+
+    overflow-y:auto;
+
+    border-radius:8px;
+}
+
+#targetTable{
+    width:100%;
+    border-collapse:collapse;
+}
+
+#targetTable th,
+#targetTable td{
+    border-bottom:1px solid #e5e7eb;
+    padding:8px;
+    font-size:14px;
+}
+
+#targetTable th{
+    background:#f9fafb;
+    font-weight:800;
+}

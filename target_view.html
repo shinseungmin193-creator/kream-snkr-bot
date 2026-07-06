@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>KREAM 수정 대상</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    padding: 20px;
+  }
+
+  h2 {
+    margin-bottom: 10px;
+  }
+
+  #status {
+    margin-bottom: 15px;
+    padding: 10px;
+    background: #f7f7f7;
+    border: 1px solid #ddd;
+    font-size: 14px;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+
+  th, td {
+    border: 1px solid #ddd;
+    padding: 10px;
+    font-size: 14px;
+  }
+
+  th {
+    background: #f3f3f3;
+  }
+
+  tr:hover {
+    background: #fafafa;
+  }
+
+  tbody tr {
+    cursor: pointer;
+  }
+
+  .small {
+    color: #777;
+    font-size: 13px;
+    margin-bottom: 15px;
+  }
+</style>
+</head>
+<body>
+
+<h2 id="title">KREAM 수정 대상 0개</h2>
+<div id="status">불러오는중...</div>
+<div class="small">행을 클릭하면 KREAM 재고별 입찰관리에서 해당 상품을 찾아 재고 수정 버튼까지 자동으로 누릅니다.</div>
+
+<table id="targetTable">
+<thead>
+<tr>
+  <th>No</th>
+  <th>상품명</th>
+  <th>옵션</th>
+  <th>현재가</th>
+  <th>최저가</th>
+  <th>차액</th>
+  <th>수량</th>
+  <th>stockId</th>
+</tr>
+</thead>
+<tbody>
+</tbody>
+</table>
+
+<script>
+const titleBox = document.getElementById('title');
+const statusBox = document.getElementById('status');
+const tbody = document.querySelector('#targetTable tbody');
+
+const params = new URLSearchParams(location.search);
+let currentType = params.get('type') || 'all';
+
+function getTypeLabel(type) {
+    if (type === 'pokemon') return '포켓몬';
+    if (type === 'onepiece') return '원피스';
+    return '전체';
+}
+
+function formatNumber(value) {
+    const num = Number(value || 0);
+    return num.toLocaleString();
+}
+
+function clearTable(message) {
+    tbody.innerHTML = `
+        <tr>
+            <td colspan="8" style="text-align:center;">
+                ${message}
+            </td>
+        </tr>
+    `;
+}
+
+function renderItems(items) {
+    tbody.innerHTML = '';
+
+    if (!items || items.length === 0) {
+        titleBox.textContent = `KREAM ${getTypeLabel(currentType)} 수정 대상 0개`;
+        statusBox.textContent = '수정대상 없음';
+        clearTable('수정대상 없음');
+        return;
+    }
+
+    titleBox.textContent = `KREAM ${getTypeLabel(currentType)} 수정 대상 ${items.length}개`;
+    statusBox.textContent = '행을 클릭하면 재고 수정 페이지를 엽니다.';
+
+    items.forEach((item, index) => {
+        const myPrice = Number(item.myPrice || 0);
+        const lowestPrice = Number(item.lowestPrice || 0);
+        const qty = Number(item.qty || 0);
+        const diff = myPrice - lowestPrice;
+
+        let diffText = diff.toLocaleString();
+
+        if (diff > 0) {
+            diffText = `+${diff.toLocaleString()}`;
+        }
+
+        const tr = document.createElement('tr');
+
+        tr.dataset.stockId = item.stockId || '';
+
+        tr.innerHTML = `
+            <td>${index + 1}</td>
+            <td>${item.koreanName || ''}</td>
+            <td>${item.option || ''}</td>
+            <td>${formatNumber(myPrice)}</td>
+            <td>${formatNumber(lowestPrice)}</td>
+            <td>${diffText}</td>
+            <td>${formatNumber(qty)}</td>
+            <td>${item.stockId || ''}</td>
+        `;
+
+        tr.addEventListener('click', () => {
+            openStockEdit(item.stockId, tr);
+        });
+
+        tbody.appendChild(tr);
+    });
+}
+
+async function loadTargets() {
+    try {
+        statusBox.textContent = '수정대상 불러오는중...';
+        clearTable('불러오는중...');
+
+        const res = await fetch(`/api/targets?type=${currentType}&t=${Date.now()}`);
+        const data = await res.json();
+
+        if (!data.success) {
+            throw new Error(data.message || '수정대상 불러오기 실패');
+        }
+
+        renderItems(data.items);
+
+    } catch (err) {
+        titleBox.textContent = `KREAM 수정 대상`;
+        statusBox.textContent = '불러오기 실패';
+        clearTable(err.message);
+    }
+}
+
+async function openStockEdit(stockId, row) {
+    if (!stockId) {
+        alert('stockId 없음');
+        return;
+    }
+
+    row.style.opacity = '0.5';
+    statusBox.textContent = `재고 수정 페이지 여는중... stockId=${stockId}`;
+
+    try {
+        const res = await fetch(`/api/open-stock-edit?stockId=${encodeURIComponent(stockId)}&t=${Date.now()}`);
+        const data = await res.json();
+
+        if (!data.success) {
+            throw new Error(data.message || '재고 수정 페이지 열기 실패');
+        }
+
+        statusBox.textContent = `재고 수정 페이지 열기 완료: stockId=${stockId}`;
+
+    } catch (err) {
+        alert(err.message);
+        statusBox.textContent = `재고 수정 페이지 열기 실패: ${err.message}`;
+
+    } finally {
+        row.style.opacity = '1';
+    }
+}
+
+loadTargets();
+</script>
+
+</body>
+</html>
