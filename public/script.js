@@ -6,7 +6,11 @@ const stopBtn = document.getElementById('stopBtn');
 const statusBox = document.getElementById('status');
 const logBox = document.getElementById('log');
 
+const STOP_BUTTON_LABEL = '전체 작업 중지';
+const AUTO_EDIT_LABEL = '전체 자동수정';
+
 let currentType = 'all';
+let currentTargets = [];
 let liveTargetCount = 0;
 let isRunning = false;
 let isAutoEditing = false;
@@ -14,35 +18,166 @@ let isStopRequested = false;
 
 let eventSource = null;
 
+function appendLog(text) {
+    if (!logBox) return;
+
+    logBox.textContent += text + '\n';
+    logBox.scrollTop = logBox.scrollHeight;
+}
+
+function setStatus(text) {
+    if (!statusBox) return;
+    statusBox.textContent = text;
+}
+
+function isFetchFailure(message) {
+    const text = String(message || '').toLowerCase();
+
+    return (
+        text.includes('failed to fetch') ||
+        text.includes('load failed') ||
+        text.includes('networkerror')
+    );
+}
+
+function isClosedPageMessage(message) {
+    const text = String(message || '').toLowerCase();
+
+    return (
+        text.includes('target page') ||
+        text.includes('context or browser has been closed') ||
+        text.includes('browser has been closed') ||
+        text.includes('page has been closed') ||
+        text.includes('target closed')
+    );
+}
+
+function isStopLikeError(message) {
+    const text = String(message || '').toLowerCase();
+
+    return (
+        isStopRequested ||
+        text.includes('중지') ||
+        text.includes('stop') ||
+        isClosedPageMessage(text)
+    );
+}
+
+function reportSoftError(message, statusText = '연결 일시 오류 / 재시도 가능') {
+    if (isStopRequested) {
+        appendLog(`[중지됨] ${message}`);
+        return;
+    }
+
+    appendLog(`[오류] ${message}`);
+    setStatus(statusText);
+}
+
+function setStopButtonReady() {
+    if (!stopBtn) return;
+
+    stopBtn.disabled = false;
+    stopBtn.textContent = STOP_BUTTON_LABEL;
+    stopBtn.style.opacity = '1';
+    stopBtn.style.cursor = 'pointer';
+}
+
+function setAutoEditButtonReady() {
+    const autoButton = document.getElementById('autoEditAllBtn');
+
+    if (!autoButton) return;
+
+    autoButton.disabled = false;
+    autoButton.textContent = AUTO_EDIT_LABEL;
+    autoButton.style.opacity = '1';
+    autoButton.style.cursor = 'pointer';
+}
+
+function markStopRequested(message = '전체 작업 중지 요청 완료') {
+    isRunning = false;
+    isAutoEditing = false;
+    isStopRequested = true;
+
+    setAutoEditButtonReady();
+    setStopButtonReady();
+    setStatus(message);
+}
+
+function resetStopState() {
+    isStopRequested = false;
+    setStopButtonReady();
+}
+
+function getTargetKey(item) {
+    if (!item) return '';
+
+    return [
+        item.stockId || '',
+        item.productId || '',
+        item.productCode || '',
+        item.option || '',
+        item.koreanName || ''
+    ].join('|');
+}
+
+function mergeTargets(existingItems, incomingItems) {
+    const merged = [];
+    const indexByKey = new Map();
+
+    existingItems.forEach(item => {
+        const key = getTargetKey(item);
+        if (!key) return;
+
+        indexByKey.set(key, merged.length);
+        merged.push(item);
+    });
+
+    incomingItems.forEach(item => {
+        const key = getTargetKey(item);
+        if (!key) return;
+
+        if (indexByKey.has(key)) {
+            merged[indexByKey.get(key)] = {
+                ...merged[indexByKey.get(key)],
+                ...item
+            };
+            return;
+        }
+
+        indexByKey.set(key, merged.length);
+        merged.push(item);
+    });
+
+    return merged;
+}
+
+function getResponseTargets(data) {
+    if (Array.isArray(data?.targets)) return data.targets;
+    if (Array.isArray(data?.items)) return data.items;
+    return null;
+}
+
 function connectLog() {
     eventSource = new EventSource('/logs');
 
     eventSource.onopen = () => {
-        if (logBox) {
-            logBox.textContent += '[웹 로그 연결됨]\n';
-            logBox.scrollTop = logBox.scrollHeight;
-        }
+        appendLog('[로그 연결됨]');
     };
 
     eventSource.onmessage = event => {
         const text = event.data.replace(/\\n/g, '\n');
-
         const isSpecial = handleSpecialMessage(text);
 
         if (isSpecial) {
             return;
         }
 
-        if (logBox) {
-            logBox.textContent += text + '\n';
-            logBox.scrollTop = logBox.scrollHeight;
-        }
+        appendLog(text);
     };
 
     eventSource.onerror = () => {
-        if (logBox) {
-            logBox.textContent += '[웹 로그 연결 에러]\n';
-            logBox.scrollTop = logBox.scrollHeight;
+        if (!isStopRequested) {
+            appendLog('[로그 연결 오류]');
         }
     };
 }
@@ -84,12 +219,16 @@ function handleSpecialMessage(text) {
                 const item = JSON.parse(jsonText);
                 addLiveTarget(item);
             } catch (err) {
-                console.error('TARGET_FOUND 파싱 실패:', err);
+                appendLog(`[TARGET_FOUND 파싱 실패] ${err.message}`);
             }
         }
 
         if (msg.startsWith('__REFRESH_TARGETS__:')) {
             handled = true;
+
+            if (isStopRequested) {
+                return;
+            }
 
             const type = msg.replace('__REFRESH_TARGETS__:', '').trim();
 
@@ -104,14 +243,13 @@ function handleSpecialMessage(text) {
             const type = msg.replace('__RUN_START__:', '').trim();
 
             currentType = type;
+            currentTargets = [];
             isRunning = true;
+            isStopRequested = false;
             liveTargetCount = 0;
 
-            clearTable(`${getTypeLabel(type)} 새 결과 생성중...`);
-
-            if (statusBox) {
-                statusBox.textContent = `${getTypeLabel(type)} 실행중...`;
-            }
+            clearTable(`${getTypeLabel(type)} 결과 생성중...`);
+            setStatus(`${getTypeLabel(type)} 실행중...`);
         }
 
         if (msg.startsWith('__RUN_DONE__:')) {
@@ -119,41 +257,18 @@ function handleSpecialMessage(text) {
 
             const type = msg.replace('__RUN_DONE__:', '').trim();
 
-            isRunning = false;
-
-            if (statusBox) {
-                statusBox.textContent = `${getTypeLabel(type)} 작업 완료`;
+            if (isStopRequested) {
+                return;
             }
 
+            isRunning = false;
+            setStatus(`${getTypeLabel(type)} 작업 완료`);
             loadTargets(type);
         }
 
         if (msg.startsWith('__STOP_REQUESTED__')) {
             handled = true;
-
-            isRunning = false;
-            isAutoEditing = false;
-            isStopRequested = true;
-
-            const autoButton = document.getElementById('autoEditAllBtn');
-
-            if (autoButton) {
-                autoButton.disabled = false;
-                autoButton.textContent = '전체 자동수정';
-                autoButton.style.opacity = '1';
-                autoButton.style.cursor = 'pointer';
-            }
-
-            if (stopBtn) {
-                stopBtn.disabled = false;
-                stopBtn.textContent = '🛑 전체 작업 중지';
-                stopBtn.style.opacity = '1';
-                stopBtn.style.cursor = 'pointer';
-            }
-
-            if (statusBox) {
-                statusBox.textContent = '전체 작업 중지됨';
-            }
+            markStopRequested('전체 작업 중지됨');
         }
     });
 
@@ -174,7 +289,7 @@ function setupAutoEditButton() {
     if (!button) {
         button = document.createElement('button');
         button.id = 'autoEditAllBtn';
-        button.textContent = '전체 자동수정';
+        button.textContent = AUTO_EDIT_LABEL;
         button.style.margin = '10px 0';
         button.style.padding = '10px 16px';
         button.style.cursor = 'pointer';
@@ -244,7 +359,7 @@ function clearTable(message) {
     `;
 }
 
-function renderItems(items) {
+function renderTargets(items) {
     setupTableHeader();
 
     const tbody = document.querySelector('#targetTable tbody');
@@ -253,14 +368,18 @@ function renderItems(items) {
 
     tbody.innerHTML = '';
 
-    if (!items || items.length === 0) {
-        clearTable('수정대상 없음');
+    if (!Array.isArray(items) || items.length === 0) {
+        clearTable('수정 대상 없음');
         return;
     }
 
     items.forEach((item, index) => {
         appendTargetRow(item, index + 1);
     });
+}
+
+function renderItems(items) {
+    renderTargets(items);
 }
 
 function appendTargetRow(item, no) {
@@ -312,13 +431,13 @@ function appendTargetRow(item, no) {
 
     editButton.addEventListener('click', event => {
         event.stopPropagation();
-        openStockEdit(item.stockId, newPrice, tr);
+        openStockEdit(item.stockId, newPrice, tr, { fromAuto: false });
     });
 
     tbody.appendChild(tr);
 }
 
-function setRowStatus(row, text, color) {
+function updateRowStatus(row, text, color) {
     if (!row) return;
 
     const statusCell = row.querySelector('.edit-status');
@@ -336,11 +455,15 @@ function setRowStatus(row, text, color) {
         statusCell.style.color = '#f59e0b';
     } else if (text === '수정완료') {
         statusCell.style.color = '#16a34a';
-    } else if (text === '실패') {
+    } else if (text === '실패' || text === '중지됨' || text === '연결끊김') {
         statusCell.style.color = '#dc2626';
     } else {
         statusCell.style.color = color || '#6b7280';
     }
+}
+
+function setRowStatus(row, text, color) {
+    updateRowStatus(row, text, color);
 }
 
 function setRowButton(row, disabled, text) {
@@ -359,7 +482,7 @@ function setRowButton(row, disabled, text) {
         button.style.background = '#f59e0b';
     } else if (text === '완료') {
         button.style.background = '#16a34a';
-    } else if (text === '재수정') {
+    } else if (text === '재시도') {
         button.style.background = '#dc2626';
     } else {
         button.style.background = '#2563eb';
@@ -371,50 +494,83 @@ function setRowButton(row, disabled, text) {
 }
 
 function addLiveTarget(item) {
-    setupTableHeader();
-
-    liveTargetCount += 1;
-    appendTargetRow(item, liveTargetCount);
-
-    if (statusBox) {
-        statusBox.textContent = `${getTypeLabel(currentType)} 실행중... 수정대상 ${liveTargetCount}개 발견`;
+    if (isStopRequested) {
+        return;
     }
+
+    currentTargets = mergeTargets(currentTargets, [item]);
+    liveTargetCount = currentTargets.length;
+
+    renderTargets(currentTargets);
+    setStatus(`${getTypeLabel(currentType)} 실행중... 수정대상 ${liveTargetCount}개 발견`);
 }
 
 async function loadTargets(type = currentType) {
     currentType = type;
-    liveTargetCount = 0;
 
-    const res = await fetch(`/api/targets?type=${type}&t=${Date.now()}`);
-    const data = await res.json();
+    try {
+        const res = await fetch(`/api/targets?type=${type}&t=${Date.now()}`);
+        const data = await res.json();
 
-    if (!data.success) {
-        clearTable('수정대상 불러오기 실패');
-        return;
-    }
+        if (isStopRequested) {
+            return;
+        }
 
-    renderItems(data.items);
-    liveTargetCount = data.items ? data.items.length : 0;
+        if (!data.success) {
+            appendLog(`[수정대상 새로고침 실패] ${data.message || 'success=false'}`);
+            setStatus('연결 일시 오류 / 재시도 가능');
+            return;
+        }
 
-    if (!isRunning && statusBox) {
-        statusBox.textContent = `${getTypeLabel(type)} 수정대상 ${liveTargetCount}개`;
+        const incomingTargets = getResponseTargets(data);
+
+        if (!Array.isArray(incomingTargets)) {
+            appendLog('[수정대상 새로고침 보류] 응답 데이터가 배열이 아님');
+            setStatus('연결 일시 오류 / 재시도 가능');
+            return;
+        }
+
+        currentTargets = mergeTargets(currentTargets, incomingTargets);
+        liveTargetCount = currentTargets.length;
+
+        if (isAutoEditing) {
+            appendLog(`[수정대상 새로고침 보류] 자동수정 중이어서 현재 행 유지 / ${liveTargetCount}개`);
+            return;
+        }
+
+        renderTargets(currentTargets);
+
+        if (!isRunning) {
+            setStatus(`${getTypeLabel(type)} 수정대상 ${liveTargetCount}개`);
+        }
+    } catch (err) {
+        if (isStopRequested || isStopLikeError(err.message)) {
+            return;
+        }
+
+        appendLog(`[수정대상 새로고침 실패] ${err.message}`);
+        setStatus('연결 일시 오류 / 재시도 가능');
     }
 }
 
-async function openStockEdit(stockId, newPrice, row) {
+async function openStockEdit(stockId, newPrice, row, options = {}) {
+    const fromAuto = options.fromAuto === true;
+
     if (isStopRequested) {
-        return false;
+        return null;
     }
 
     if (!stockId) {
-        alert('stockId 없음');
+        updateRowStatus(row, '실패');
+        reportSoftError('stockId 없음', '수정 실패');
         return false;
     }
 
     const targetPrice = parsePrice(newPrice || row?.dataset?.newPrice);
 
     if (!targetPrice || targetPrice <= 0) {
-        alert('입력가 없음');
+        updateRowStatus(row, '실패');
+        reportSoftError('입력가 없음', '수정 실패');
         return false;
     }
 
@@ -422,12 +578,9 @@ async function openStockEdit(stockId, newPrice, row) {
         row.style.opacity = '0.55';
     }
 
-    setRowStatus(row, '수정중...');
+    updateRowStatus(row, '수정중...');
     setRowButton(row, true, '수정중');
-
-    if (statusBox) {
-        statusBox.textContent = `자동수정 중... stockId=${stockId}, 입력가=${formatPrice(targetPrice)}`;
-    }
+    setStatus(`자동수정 중... stockId=${stockId}, 입력가=${formatPrice(targetPrice)}`);
 
     try {
         const res = await fetch(
@@ -436,34 +589,44 @@ async function openStockEdit(stockId, newPrice, row) {
 
         const data = await res.json();
 
+        if (isStopRequested || data.stopped) {
+            markStopRequested('전체 작업 중지됨');
+            updateRowStatus(row, '중지됨');
+            setRowButton(row, false, '수정');
+            return null;
+        }
+
         if (!data.success) {
             throw new Error(data.message || '재고 수정 실패');
         }
 
-        setRowStatus(row, '수정완료');
+        updateRowStatus(row, '수정완료');
         setRowButton(row, true, '완료');
-
-        if (statusBox) {
-            statusBox.textContent = `수정완료: stockId=${stockId}, 입력가=${formatPrice(targetPrice)}`;
-        }
+        setStatus(`수정완료: stockId=${stockId}, 입력가=${formatPrice(targetPrice)}`);
 
         return true;
 
     } catch (err) {
-        if (isStopRequested) {
-            setRowStatus(row, '중지됨', '#dc2626');
-            setRowButton(row, false, '재수정');
-            return false;
+        const message = err.message || String(err);
+
+        if (isStopRequested || isStopLikeError(message)) {
+            markStopRequested('전체 작업 중지됨');
+            updateRowStatus(row, '중지됨');
+            setRowButton(row, false, '수정');
+            return null;
         }
 
-        setRowStatus(row, '실패');
-        setRowButton(row, false, '재수정');
-
-        if (statusBox) {
-            statusBox.textContent = `수정 실패: stockId=${stockId}`;
+        if (isFetchFailure(message)) {
+            updateRowStatus(row, '연결끊김');
+            setRowButton(row, false, '재시도');
+            appendLog(`[서버 연결 실패] stockId=${stockId}: ${message}`);
+            setStatus('연결 일시 오류 / 재시도 가능');
+            return fromAuto ? null : false;
         }
 
-        alert(err.message);
+        updateRowStatus(row, '실패');
+        setRowButton(row, false, '재시도');
+        reportSoftError(`stockId=${stockId}: ${message}`, '수정 실패');
         return false;
 
     } finally {
@@ -475,17 +638,17 @@ async function openStockEdit(stockId, newPrice, row) {
 
 async function autoEditAllRows() {
     if (isAutoEditing) {
-        alert('이미 전체 자동수정 실행중');
+        reportSoftError('이미 전체 자동수정 실행중', '전체 자동수정 실행중');
         return;
     }
 
-    isStopRequested = false;
+    resetStopState();
 
     const rows = Array.from(document.querySelectorAll('#targetTable tbody tr'))
         .filter(row => row.dataset.stockId);
 
     if (rows.length === 0) {
-        alert('수정할 상품 없음');
+        reportSoftError('수정할 상품 없음', '수정할 상품 없음');
         return;
     }
 
@@ -502,6 +665,7 @@ async function autoEditAllRows() {
 
     let successCount = 0;
     let failCount = 0;
+    let stoppedByConnection = false;
 
     for (let i = 0; i < rows.length; i++) {
         if (isStopRequested) {
@@ -512,100 +676,105 @@ async function autoEditAllRows() {
         const stockId = row.dataset.stockId;
         const newPrice = parsePrice(row.dataset.newPrice);
 
-        if (statusBox) {
-            statusBox.textContent = `전체 자동수정 중... ${i + 1}/${rows.length} stockId=${stockId}, 입력가=${formatPrice(newPrice)}`;
-        }
+        setStatus(`전체 자동수정 중... ${i + 1}/${rows.length} stockId=${stockId}, 입력가=${formatPrice(newPrice)}`);
 
-        const ok = await openStockEdit(stockId, newPrice, row);
-
-        if (ok) {
-            successCount += 1;
-        } else {
-            failCount += 1;
-        }
+        const result = await openStockEdit(stockId, newPrice, row, { fromAuto: true });
 
         if (isStopRequested) {
             break;
+        }
+
+        if (result === null) {
+            if (row?.querySelector('.edit-status')?.textContent === '연결끊김') {
+                stoppedByConnection = true;
+                failCount += 1;
+            }
+            break;
+        }
+
+        if (result === true) {
+            successCount += 1;
+        } else {
+            failCount += 1;
         }
 
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
     isAutoEditing = false;
-
-    if (autoButton) {
-        autoButton.disabled = false;
-        autoButton.textContent = '전체 자동수정';
-        autoButton.style.opacity = '1';
-        autoButton.style.cursor = 'pointer';
-    }
+    setAutoEditButtonReady();
 
     if (isStopRequested) {
-        if (statusBox) {
-            statusBox.textContent = `전체 자동수정 중지됨 / 성공 ${successCount}개 / 실패 ${failCount}개`;
-        }
-
-        alert(`전체 자동수정 중지됨\n성공: ${successCount}개\n실패: ${failCount}개`);
+        setStatus(`전체 자동수정 중지됨 / 성공 ${successCount}개 / 실패 ${failCount}개`);
         return;
     }
 
-    if (statusBox) {
-        statusBox.textContent = `전체 자동수정 완료 / 성공 ${successCount}개 / 실패 ${failCount}개`;
+    if (stoppedByConnection) {
+        setStatus(`연결 일시 오류 / 재시도 가능 / 성공 ${successCount}개 / 실패 ${failCount}개`);
+        appendLog(`[전체 자동수정 중단] 서버 연결 실패 / 성공 ${successCount}개 / 실패 ${failCount}개`);
+        return;
     }
 
-    alert(`전체 자동수정 완료\n성공: ${successCount}개\n실패: ${failCount}개`);
+    setStatus(`전체 자동수정 완료 / 성공 ${successCount}개 / 실패 ${failCount}개`);
+    appendLog(`[전체 자동수정 완료] 성공 ${successCount}개 / 실패 ${failCount}개`);
 }
 
 function runAndRefresh(type, url, label) {
-    isStopRequested = false;
+    resetStopState();
+
     currentType = type;
+    currentTargets = [];
     liveTargetCount = 0;
     isRunning = true;
 
-    if (statusBox) {
-        statusBox.textContent = `${label} 실행중...`;
-    }
+    setStatus(`${label} 실행중...`);
 
     if (logBox) {
         logBox.textContent = '';
     }
 
-    clearTable(`${label} 새 결과 생성중...`);
+    clearTable(`${label} 결과 생성중...`);
 
     fetch(url)
         .then(res => res.json())
         .then(async data => {
             isRunning = false;
 
+            if (isStopRequested || data.stopped) {
+                markStopRequested('전체 작업 중지됨');
+                return;
+            }
+
             if (!data.success) {
-                if (statusBox) {
-                    statusBox.textContent = '실패';
+                if (isStopLikeError(data.message)) {
+                    markStopRequested('전체 작업 중지됨');
+                    return;
                 }
 
-                clearTable(`${label} 실행 실패`);
-                alert('실패: ' + data.message);
+                setStatus('실패');
+                appendLog(`[실행 실패] ${data.message}`);
                 return;
             }
 
             await loadTargets(type);
-
-            if (statusBox) {
-                statusBox.textContent = `${label} 작업 완료 / 수정대상 ${liveTargetCount}개`;
-            }
+            setStatus(`${label} 작업 완료 / 수정대상 ${liveTargetCount}개`);
         })
         .catch(err => {
             isRunning = false;
 
-            if (statusBox) {
-                statusBox.textContent = '에러 발생';
+            if (isStopRequested || isStopLikeError(err.message)) {
+                markStopRequested('전체 작업 중지됨');
+                return;
             }
 
-            clearTable(`${label} 실행 에러`);
-            alert(err.message);
+            setStatus('연결 일시 오류 / 재시도 가능');
+            appendLog(`[실행 오류] ${err.message}`);
         });
 }
 
 if (stopBtn) {
+    setStopButtonReady();
+
     stopBtn.addEventListener('click', async () => {
         const ok = confirm('현재 실행중인 모든 작업을 중지할까요?');
 
@@ -616,42 +785,30 @@ if (stopBtn) {
         isStopRequested = true;
 
         stopBtn.disabled = true;
-        stopBtn.textContent = '🛑 중지 요청중...';
+        stopBtn.textContent = STOP_BUTTON_LABEL;
         stopBtn.style.opacity = '0.6';
         stopBtn.style.cursor = 'not-allowed';
 
-        if (statusBox) {
-            statusBox.textContent = '전체 작업 중지 요청중...';
-        }
+        setStatus('전체 작업 중지 요청중...');
 
         try {
             const res = await fetch(`/api/stop?t=${Date.now()}`);
             const data = await res.json();
 
-            if (!data.success) {
+            if (!data.success && !data.stopped) {
                 throw new Error(data.message || '중지 실패');
             }
 
-            isRunning = false;
-            isAutoEditing = false;
-
-            if (statusBox) {
-                statusBox.textContent = '전체 작업 중지 요청 완료';
-            }
-
-            if (logBox) {
-                logBox.textContent += '\n[전체 작업 중지 요청 완료]\n';
-                logBox.scrollTop = logBox.scrollHeight;
-            }
+            markStopRequested('전체 작업 중지 요청 완료');
+            appendLog('[전체 작업 중지 요청 완료]');
 
         } catch (err) {
-            alert(err.message);
+            if (!isStopLikeError(err.message)) {
+                appendLog(`[중지 요청 오류] ${err.message}`);
+            }
 
         } finally {
-            stopBtn.disabled = false;
-            stopBtn.textContent = '🛑 전체 작업 중지';
-            stopBtn.style.opacity = '1';
-            stopBtn.style.cursor = 'pointer';
+            setStopButtonReady();
         }
     });
 }
@@ -677,5 +834,5 @@ if (allBtn) {
 setupTableHeader();
 
 if (document.querySelector('#targetTable')) {
-    clearTable('실행 버튼을 눌러주세요.');
+    clearTable('실행 버튼을 눌러주세요');
 }

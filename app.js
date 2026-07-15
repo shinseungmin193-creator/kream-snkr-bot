@@ -15,6 +15,19 @@ let currentChild = null;
 let currentPage = null;
 let currentBrowser = null;
 
+const STOP_MESSAGE = '전체 작업 중지';
+
+function isStopError(err) {
+    const msg = String(err && err.message ? err.message : err || '');
+
+    return (
+        stopRequested ||
+        msg.includes(STOP_MESSAGE) ||
+        msg.includes('중지') ||
+        msg.includes('stop')
+    );
+}
+
 function sendSse(text) {
     const msg = String(text);
 
@@ -39,6 +52,11 @@ function resetStop() {
 }
 
 function requestStop() {
+    if (stopRequested) {
+        sendSpecial('__STOP_REQUESTED__');
+        return;
+    }
+
     stopRequested = true;
 
     sendLog('🛑 전체 작업 중지 요청 수신');
@@ -54,14 +72,17 @@ function requestStop() {
     }
 
     if (currentPage) {
-        currentPage.close().catch(() => {});
+        const pageToClose = currentPage;
+        currentPage = null;
+
+        pageToClose.close().catch(() => {});
         sendLog('현재 Playwright 페이지 종료 요청');
     }
 }
 
 function checkStop() {
     if (stopRequested) {
-        throw new Error('사용자 중지 요청으로 작업 종료');
+        throw new Error(STOP_MESSAGE);
     }
 }
 
@@ -126,6 +147,14 @@ function handleScriptLine(line) {
     }
 
     sendLog(text);
+}
+
+function sendStoppedResponse(res) {
+    res.json({
+        success: false,
+        stopped: true,
+        message: STOP_MESSAGE
+    });
 }
 
 app.get('/logs', (req, res) => {
@@ -195,7 +224,7 @@ function runScript(scriptName, args = []) {
                 finishedByStop = true;
                 sendLog(`===== ${scriptName} 중지됨 =====`);
                 currentChild = null;
-                reject(new Error('사용자 중지 요청으로 작업 종료'));
+                reject(new Error(STOP_MESSAGE));
                 return;
             }
 
@@ -214,7 +243,7 @@ function runScript(scriptName, args = []) {
             currentChild = null;
 
             if (finishedByStop || stopRequested) {
-                reject(new Error('사용자 중지 요청으로 작업 종료'));
+                reject(new Error(STOP_MESSAGE));
                 return;
             }
 
@@ -630,6 +659,11 @@ app.get('/run/pokemon', async (req, res) => {
         });
 
     } catch (err) {
+        if (isStopError(err)) {
+            sendLog('작업 중지 : ' + STOP_MESSAGE);
+            return sendStoppedResponse(res);
+        }
+
         sendLog('작업 실패 : ' + err.message);
 
         res.status(500).json({
@@ -651,6 +685,11 @@ app.get('/run/onepiece', async (req, res) => {
         });
 
     } catch (err) {
+        if (isStopError(err)) {
+            sendLog('작업 중지 : ' + STOP_MESSAGE);
+            return sendStoppedResponse(res);
+        }
+
         sendLog('작업 실패 : ' + err.message);
 
         res.status(500).json({
@@ -676,6 +715,11 @@ app.get('/run/all', async (req, res) => {
         });
 
     } catch (err) {
+        if (isStopError(err)) {
+            sendLog('전체 실행 중지 : ' + STOP_MESSAGE);
+            return sendStoppedResponse(res);
+        }
+
         sendLog('전체 실행 실패 : ' + err.message);
 
         res.status(500).json({
@@ -747,6 +791,11 @@ app.get('/api/open-stock-edit', async (req, res) => {
         });
 
     } catch (err) {
+        if (isStopError(err)) {
+            sendLog('재고 수정 중지 : ' + STOP_MESSAGE);
+            return sendStoppedResponse(res);
+        }
+
         sendLog('재고 수정 실패 : ' + err.message);
 
         res.status(500).json({
@@ -761,6 +810,7 @@ app.get('/api/stop', (req, res) => {
 
     res.json({
         success: true,
+        stopped: true,
         message: '전체 작업 중지 요청 완료'
     });
 });
