@@ -1,12 +1,27 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const inventoryDb = require('./database');
 const { spawn, exec } = require('child_process');
 const { chromium } = require('playwright');
+const fileLogger = require('./system/file-logger');
+const {
+    SystemManager,
+    readSettings,
+    readUpdateHistory,
+    maskText,
+    config: systemConfig
+} = require('./system/system-manager');
 
 const app = express();
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+    etag: false,
+    maxAge: 0,
+    setHeaders(res) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    }
+}));
 
 let clients = [];
 
@@ -14,6 +29,17 @@ let stopRequested = false;
 let currentChild = null;
 let currentPage = null;
 let currentBrowser = null;
+let currentJobName = null;
+
+const systemManager = new SystemManager({
+    inventoryDb,
+    chromium,
+    getJobState: () => ({
+        busy: Boolean(currentChild || currentPage),
+        name: currentJobName || (currentPage ? 'KREAM 재고 수정' : null),
+        childPid: currentChild?.pid || null
+    })
+});
 
 const STOP_MESSAGE = '전체 작업 중지';
 
@@ -40,6 +66,8 @@ function sendLog(text) {
     const msg = String(text);
 
     process.stdout.write(msg.endsWith('\n') ? msg : msg + '\n');
+    fileLogger.write('app', msg);
+    if (/^\[ERROR\]|실패|오류/.test(msg)) fileLogger.write('error', msg);
     sendSse(msg);
 }
 
@@ -130,7 +158,7 @@ function formatPrice(value) {
     return Number(value || 0).toLocaleString('ko-KR');
 }
 
-function handleScriptLine(line) {
+function handleScriptLine(line, logType = null) {
     const text = String(line || '').trimEnd();
 
     if (!text) {
@@ -146,6 +174,7 @@ function handleScriptLine(line) {
         return;
     }
 
+    if (logType) fileLogger.write(logType, text);
     sendLog(text);
 }
 
@@ -178,11 +207,17 @@ function runScript(scriptName, args = []) {
     return new Promise((resolve, reject) => {
         checkStop();
 
+        const scriptPath = path.resolve(__dirname, scriptName);
         sendLog(`===== ${scriptName} 시작 =====`);
+        sendLog(`실행 파일: ${scriptPath}`);
+        sendLog(`실행 인자: ${JSON.stringify(args)}`);
 
-        currentChild = spawn('node', [scriptName, ...args], {
+        const logType = scriptName === 'inventory.js' ? 'inventory' : scriptName === 'compareAll.js' ? 'compare' : null;
+        currentJobName = scriptName;
+        currentChild = spawn(process.execPath, [scriptPath, ...args], {
             cwd: __dirname,
-            shell: true
+            // Keep empty/explicit arguments intact on Windows. A shell may drop ''.
+            shell: false
         });
 
         let stdoutBuffer = '';
@@ -196,7 +231,7 @@ function runScript(scriptName, args = []) {
             stdoutBuffer = lines.pop();
 
             lines.forEach(line => {
-                handleScriptLine(line);
+                handleScriptLine(line, logType);
             });
         });
 
@@ -208,12 +243,13 @@ function runScript(scriptName, args = []) {
 
             lines.forEach(line => {
                 sendLog('[ERROR] ' + line);
+                if (logType) fileLogger.write(logType, `[ERROR] ${line}`);
             });
         });
 
         currentChild.on('close', code => {
             if (stdoutBuffer.trim()) {
-                handleScriptLine(stdoutBuffer);
+                handleScriptLine(stdoutBuffer, logType);
             }
 
             if (stderrBuffer.trim()) {
@@ -224,6 +260,7 @@ function runScript(scriptName, args = []) {
                 finishedByStop = true;
                 sendLog(`===== ${scriptName} 중지됨 =====`);
                 currentChild = null;
+                currentJobName = null;
                 reject(new Error(STOP_MESSAGE));
                 return;
             }
@@ -231,6 +268,7 @@ function runScript(scriptName, args = []) {
             sendLog(`===== ${scriptName} 종료 (${code}) =====`);
 
             currentChild = null;
+            currentJobName = null;
 
             if (code === 0) {
                 resolve();
@@ -241,6 +279,7 @@ function runScript(scriptName, args = []) {
 
         currentChild.on('error', err => {
             currentChild = null;
+            currentJobName = null;
 
             if (finishedByStop || stopRequested) {
                 reject(new Error(STOP_MESSAGE));
@@ -260,7 +299,8 @@ async function runKreamFlow(keyword) {
     sendLog(`${keyword} 실행 시작`);
     sendSpecial(`__RUN_START__:${type}`);
 
-    await runScript('inventory.js', [keyword]);
+    // Legacy flows keep their explicit keyword; inventory sync uses --sync-all separately.
+    await runScript('inventory.js', ['--keyword', keyword]);
     checkStop();
 
     await runScript('compareAll.js', [keyword]);
@@ -783,6 +823,7 @@ app.get('/api/open-stock-edit', async (req, res) => {
         }
 
         await openKreamStockEdit(stockId, newPrice);
+        inventoryDb.markUpdate(stockId, 'COMPLETED', null, newPrice);
 
         res.json({
             success: true,
@@ -815,9 +856,265 @@ app.get('/api/stop', (req, res) => {
     });
 });
 
-app.listen(3000, () => {
+// KREAM BOT v2 DB-backed inventory API. Existing automation endpoints above remain compatible.
+app.get('/api/inventory', (req, res) => {
+    try { res.json({ success: true, ...inventoryDb.listInventory(req.query) }); }
+    catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.get('/api/dashboard/summary', (req, res) => {
+    try { res.json({ success: true, summary: inventoryDb.summary() }); }
+    catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.get('/api/inventory/targets', (req, res) => {
+    try { res.json({ success: true, items: inventoryDb.targets(), comparisonComplete: true }); }
+    catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.patch('/api/inventory/:stockId/floor-price', express.json(), (req, res) => {
+    try {
+        const floorPrice = inventoryDb.saveFloorPrice(String(req.params.stockId), req.body?.floorPrice);
+        sendLog(`하한가 저장 완료: stockId=${req.params.stockId}, ${floorPrice === null ? '미설정' : `${formatPrice(floorPrice)}원`}`);
+        res.json({ success: true, stockId: req.params.stockId, floorPrice });
+    } catch (err) {
+        sendLog(`하한가 저장 실패: ${err.message}`);
+        res.status(400).json({ success: false, message: err.message });
+    }
+});
+
+app.post('/api/inventory/lower-prices', express.json(), (req, res) => {
+    try {
+        const items = inventoryDb.saveFloorPrices(req.body?.items);
+        sendLog(`하한가 저장 완료: ${items.length}개`);
+        res.json({ success: true, count: items.length, items });
+    } catch (err) {
+        sendLog(`하한가 일괄 저장 실패: ${err.message}`);
+        res.status(400).json({ success: false, message: err.message });
+    }
+});
+
+app.post('/api/inventory/sync', async (req, res) => {
+    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
+    try {
+        resetStop(); sendLog('판매목록 동기화 시작');
+        // Dedicated all-inventory mode. Never reuse the Pokemon/One Piece keyword path.
+        await runScript('inventory.js', ['--sync-all']); checkStop();
+        const filePath = path.join(__dirname, 'inventory_all.json');
+        const items = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const counts = inventoryDb.upsertInventory(items, true);
+        inventoryDb.addHistory('INVENTORY_SYNC', 'SUCCESS', { total: items.length, ...counts });
+        sendLog(`${counts.success}개 동기화 완료 / 실패 ${counts.failure}개`);
+        sendSpecial('__INVENTORY_REFRESH__');
+        res.json({ success: true, total: items.length, ...counts });
+    } catch (err) {
+        if (isStopError(err)) return sendStoppedResponse(res);
+        inventoryDb.addHistory('INVENTORY_SYNC', 'FAILED', {}, err.message);
+        sendLog(`판매목록 동기화 실패: ${err.message}`);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.post('/api/inventory/compare', async (req, res) => {
+    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
+    try {
+        resetStop(); sendLog('가격 비교 시작');
+        const active = inventoryDb.db.prepare("SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' ORDER BY id").all();
+        fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(active.map(i => ({...i,koreanName:i.productName,option:i.optionName,sellPrice:i.currentPrice,productCode:i.productId ? `(${i.productId})` : ''})), null, 2));
+        await runScript('compareAll.js', ['']); checkStop();
+        const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+        const counts = inventoryDb.applyComparison(results);
+        inventoryDb.addHistory('PRICE_COMPARE', 'SUCCESS', { total: results.length, success: results.length-counts.failures, failure: counts.failures });
+        sendLog(`가격 비교 완료: 수정 대상 ${counts.targets}개 / 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
+        sendSpecial('__TARGETS_REFRESH__');
+        res.json({ success: true, total: results.length, ...counts });
+    } catch (err) {
+        if (isStopError(err)) return sendStoppedResponse(res);
+        sendLog(`가격 비교 실패: ${err.message}`); res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+app.post('/api/compare-selected', express.json(), async (req, res) => {
+    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
+
+    const stockIds = [...new Set((Array.isArray(req.body?.stockIds) ? req.body.stockIds : [])
+        .map(value => String(value || '').trim()).filter(Boolean))];
+    if (!stockIds.length) return res.status(400).json({ success: false, message: '가격 비교할 재고를 선택하세요.' });
+
+    try {
+        resetStop();
+        const placeholders = stockIds.map(() => '?').join(',');
+        const selected = inventoryDb.db.prepare(
+            `SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' AND stockId IN (${placeholders})`
+        ).all(...stockIds);
+        if (selected.length !== stockIds.length) {
+            const found = new Set(selected.map(item => item.stockId));
+            const missing = stockIds.filter(stockId => !found.has(stockId));
+            return res.status(400).json({ success: false, message: `판매중 재고를 찾을 수 없습니다: ${missing.join(', ')}` });
+        }
+
+        sendLog(`선택 재고 ${stockIds.length}개 가격 비교 시작`);
+        fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(selected.map(i => ({
+            ...i, koreanName: i.productName, option: i.optionName, sellPrice: i.currentPrice,
+            productCode: i.productId ? `(${i.productId})` : ''
+        })), null, 2));
+
+        await runScript('compareAll.js', ['--stock-ids', stockIds.join(',')]);
+        checkStop();
+        const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+        const processedIds = new Set(results.map(item => String(item.stockId || '')));
+        if (results.length !== stockIds.length || stockIds.some(stockId => !processedIds.has(stockId))) {
+            throw new Error(`선택 비교 결과 불일치: 요청 ${stockIds.length}개, 처리 ${results.length}개`);
+        }
+
+        const counts = inventoryDb.applyComparison(results);
+        inventoryDb.addHistory('PRICE_COMPARE_SELECTED', 'SUCCESS', {
+            total: results.length, success: results.length - counts.failures, failure: counts.failures
+        });
+        sendLog(`선택 재고 ${stockIds.length}개 가격 비교 완료`);
+        sendSpecial('__TARGETS_REFRESH__');
+        res.json({ success: true, total: results.length, stockIds, processedStockIds: [...processedIds], ...counts });
+    } catch (err) {
+        if (isStopError(err)) return sendStoppedResponse(res);
+        sendLog(`선택 재고 가격 비교 실패: ${err.message}`);
+        res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// System management APIs are isolated from the existing inventory routes above.
+function requireSystemAdmin(req, res, next) {
+    const verification = systemManager.adminPin.verify(req.ip, req.get('x-kream-admin-pin'));
+    if (!verification.ok) {
+        fileLogger.write('error', `관리자 인증 실패: ip=${req.ip}, status=${verification.status}`);
+        return res.status(verification.status).json({ success: false, message: verification.message });
+    }
+    next();
+}
+
+function systemApiError(res, error, status = 500) {
+    const message = maskText(error?.message || error || '시스템 작업에 실패했습니다.').slice(0, 500);
+    fileLogger.write('error', message);
+    return res.status(status).json({ success: false, message });
+}
+
+app.get('/api/system/status', async (req, res) => {
+    try { res.json({ success: true, ...(await systemManager.getStatus()) }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/version', async (req, res) => {
+    try { res.json({ success: true, version: await systemManager.getVersion(false) }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.post('/api/system/check-update', async (req, res) => {
+    try {
+        const version = await systemManager.getVersion(true);
+        fileLogger.write('update', version.gitError ? `업데이트 확인 실패: ${version.gitError}` : `업데이트 확인 완료: behind=${version.behind}`);
+        res.json({ success: true, version });
+    } catch (error) { systemApiError(res, error); }
+});
+
+app.post('/api/system/apply-update', express.json(), requireSystemAdmin, async (req, res) => {
+    try {
+        const version = await systemManager.getVersion(false);
+        if (version.dirty) return res.status(409).json({ success: false, message: '로컬 변경사항이 있어 안전을 위해 업데이트를 차단했습니다. 변경사항을 커밋하거나 정리한 뒤 다시 시도하세요.' });
+        const result = systemManager.requestUpdate('Manual');
+        res.status(202).json({ success: true, accepted: result.accepted, message: '업데이트 작업을 시작했습니다. 검증 후 서비스가 자동으로 재시작됩니다.' });
+    } catch (error) { systemApiError(res, error, /진행 중|작업/.test(error.message) ? 409 : 500); }
+});
+
+app.post('/api/system/restart', express.json(), requireSystemAdmin, (req, res) => {
+    try {
+        const result = systemManager.requestRestart();
+        res.status(202).json({ success: true, accepted: result.accepted, message: '서비스 재시작 요청을 접수했습니다.' });
+    } catch (error) { systemApiError(res, error, /진행 중/.test(error.message) ? 409 : 500); }
+});
+
+app.get('/api/system/chrome-status', async (req, res) => {
+    try { res.json({ success: true, chrome: await systemManager.getChromeStatus() }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/info', async (req, res) => {
+    try { res.json({ success: true, info: await systemManager.getSystemInfo() }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/logs', (req, res) => {
+    try { res.json({ success: true, ...fileLogger.read(String(req.query.type || 'app'), { lines: req.query.lines, search: req.query.search }) }); }
+    catch (error) { systemApiError(res, error, 400); }
+});
+
+app.get('/api/system/logs/download', (req, res) => {
+    try {
+        const file = fileLogger.getLogPath(String(req.query.type || 'app'));
+        if (!fs.existsSync(file)) return res.status(404).json({ success: false, message: '로그 파일이 없습니다.' });
+        res.download(file, path.basename(file));
+    } catch (error) { systemApiError(res, error, 400); }
+});
+
+app.delete('/api/system/logs/:type', requireSystemAdmin, (req, res) => {
+    try {
+        fileLogger.clear(String(req.params.type));
+        res.json({ success: true, message: '로그를 삭제했습니다.' });
+    } catch (error) { systemApiError(res, error, 400); }
+});
+
+app.post('/api/system/backup', express.json(), (req, res) => {
+    try {
+        const backup = systemManager.createBackup();
+        sendLog(`DB 백업 완료: ${backup.name}`);
+        res.json({ success: true, backup });
+    } catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/backups', (req, res) => {
+    try { res.json({ success: true, items: systemManager.listBackups(), retention: readSettings().backupRetention }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/backups/:name/download', (req, res) => {
+    try {
+        const file = systemManager.getBackupPath(req.params.name);
+        res.download(file, path.basename(file));
+    } catch (error) { systemApiError(res, error, 404); }
+});
+
+app.delete('/api/system/backups/:name', requireSystemAdmin, (req, res) => {
+    try { res.json({ success: true, name: systemManager.deleteBackup(req.params.name) }); }
+    catch (error) { systemApiError(res, error, 400); }
+});
+
+app.post('/api/system/backups/retention', express.json(), requireSystemAdmin, (req, res) => {
+    try { res.json({ success: true, settings: systemManager.updateBackupRetention(req.body?.retention) }); }
+    catch (error) { systemApiError(res, error, 400); }
+});
+
+app.get('/api/system/update-history', (req, res) => {
+    try { res.json({ success: true, items: readUpdateHistory().slice(0, 50) }); }
+    catch (error) { systemApiError(res, error); }
+});
+
+app.get('/api/system/auto-update', (req, res) => {
+    res.json({ success: true, settings: readSettings() });
+});
+
+app.post('/api/system/auto-update', express.json(), requireSystemAdmin, async (req, res) => {
+    try {
+        const allowed = ['autoUpdateEnabled', 'autoUpdateTime', 'autoApply', 'deferWhenBusy', 'rollbackOnFailure'];
+        const input = Object.fromEntries(allowed.filter(key => Object.prototype.hasOwnProperty.call(req.body || {}, key)).map(key => [key, req.body[key]]));
+        const result = await systemManager.updateAutoUpdateSettings(input);
+        res.json({ success: true, settings: result.settings });
+    } catch (error) { systemApiError(res, error, 400); }
+});
+
+app.post('/api/stop', (req, res) => { requestStop(); res.json({ success: true, stopped: true }); });
+
+app.listen(systemConfig.PORT, () => {
     console.log('========================');
     console.log('KREAM BOT');
-    console.log('http://localhost:3000');
+    console.log(`http://localhost:${systemConfig.PORT}`);
     console.log('========================');
+    fileLogger.write('app', `KREAM BOT 시작: port=${systemConfig.PORT}, pid=${process.pid}`);
 });

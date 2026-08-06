@@ -1,65 +1,60 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KREAM BOT</title>
-
-    <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KREAM BOT v2</title><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="features.css"><link rel="stylesheet" href="system.css">
 </head>
-
 <body>
-
-<div class="container">
-
-    <h1>KREAM BOT</h1>
-
-    <button id="pokemonBtn">
-        포켓몬 실행
-    </button>
-
-    <button id="onepieceBtn">
-        원피스 실행
-    </button>
-
-    <button id="allBtn">
-        전체 실행
-    </button>
-
-    <button id="stopBtn">
-        전체 작업 중지
-    </button>
-
-    <div class="status">
-        <h2>상태</h2>
-        <div id="status">대기중...</div>
+<header><button id="menuBtn" class="icon">☰</button><strong>KREAM BOT</strong><div class="sync">마지막 동기화: <span id="lastSync">-</span> <b id="syncBadge">대기</b></div><span class="user">이초이상사⌄</span></header>
+  <aside id="sidebar"><nav><a href="#dashboard" class="active">▣ 대시보드</a><small>판매 관리</small><a href="#inventory">□ 판매 재고 관리</a><a href="#targets">◎ 수정 대상</a><a href="#inventory">₩ 하한가 관리</a><a href="#logs">◷ 동기화 기록</a><small>설정</small><a href="#tools">◇ 카테고리 설정</a><a href="#tools">⚙ 시스템 설정</a><a href="#system" data-view="system">⚙ 시스템 관리</a></nav></aside>
+<main id="dashboard">
+  <section class="actions dashboard-view">
+    <button class="action blue" data-action="sync"><i>⟳</i><span>판매목록 동기화<small>KREAM 판매중 전체 목록 수집</small></span></button>
+    <button class="action green" data-action="compare"><i>▥</i><span>가격 비교<small>선택 재고 최저가 조회 및 비교</small></span></button>
+    <button class="action purple" data-action="auto"><i>♙</i><span>전체 자동수정<small>수정 대상 전체 자동 실행</small></span></button>
+    <button class="action red" data-action="stop"><i>□</i><span>작업 중지<small>진행 중인 작업 중지</small></span></button>
+  </section>
+  <section id="summary" class="summary dashboard-view"></section>
+  <section class="workspace dashboard-view">
+    <article id="inventory" class="panel inventory">
+      <div class="panel-title inventory-title">
+        <h2>판매 재고 관리 <span id="inventoryCount"></span></h2>
+        <div class="inventory-actions">
+          <strong id="selectedCount">선택 0개</strong>
+          <button id="clearSelectionBtn">전체 선택 해제</button>
+          <button id="saveFloorPricesBtn">하한가 저장 <span id="dirtyFloorCount"></span></button>
+          <button id="compareSelectedBtn">선택 가격 비교</button>
+          <button id="refreshBtn">새로고침</button>
+        </div>
+      </div>
+      <div class="filters"><input id="search" placeholder="상품명, 옵션, 재고번호 검색"><select id="statusFilter"><option value="">전체 상태</option><option value="ON_SALE">판매중</option><option value="NEEDS_UPDATE">수정 필요</option><option value="FLOOR_REACHED">하한가 도달</option><option value="SOLD_OUT">판매 종료</option></select><input id="category" placeholder="카테고리"><button id="resetFilters">필터 초기화</button></div>
+      <div class="table-wrap"><table><thead><tr><th><input id="selectVisible" type="checkbox" aria-label="현재 목록 전체 선택"></th><th>번호</th><th>상품명</th><th>옵션</th><th>재고번호</th><th>판매희망가</th><th>최저가</th><th>하한가</th><th>목표가격</th><th>상태</th><th>수량</th><th>최근동기화</th></tr></thead><tbody id="inventoryBody"><tr><td colspan="12" class="empty">데이터를 불러오는 중입니다.</td></tr></tbody></table></div>
+      <footer class="pager"><button id="prevPage">‹</button><span id="pageInfo">1 / 1</span><button id="nextPage">›</button><select id="pageSize"><option>10</option><option>20</option><option>50</option></select></footer>
+      <div class="legend">● 수정 필요　● 하한가 도달　● 최저가 유지　● 판매 종료　● 수정 완료</div>
+    </article>
+    <div class="right">
+      <article id="targets" class="panel"><div class="panel-title"><h2>수정 대상 <span id="targetCount"></span></h2><button id="targetRefresh">목록 새로고침</button></div><div class="table-wrap target-wrap"><table><thead><tr><th>번호</th><th>상품명</th><th>옵션</th><th>목표가격</th><th>stockId</th><th>상태</th></tr></thead><tbody id="targetBody"><tr><td colspan="6" class="empty">수정 대상이 없습니다.</td></tr></tbody></table></div><button class="auto-outline" data-action="auto">전체 자동수정 실행</button></article>
+      <article id="logs" class="panel logs"><div class="panel-title"><h2>실시간 로그</h2><button id="clearLog">지우기</button></div><pre id="log"></pre></article>
     </div>
-
-    <div class="log">
-        <h2>로그</h2>
-        <pre id="log"></pre>
+  </section>
+  <section id="tools" class="panel tools dashboard-view"><h2>기존 실행 도구</h2><button data-legacy="pokemon">포켓몬 실행</button><button data-legacy="onepiece">원피스 실행</button><button data-legacy="all">기존 전체 실행</button><span id="status">대기 중</span></section>
+  <section id="system" class="system-view" hidden>
+    <div class="system-heading"><div><p>LOCAL SYSTEM CONTROL</p><h1>시스템 관리</h1><span>이 PC의 버전, 서비스, Chrome, 로그와 백업을 안전하게 관리합니다.</span></div><button id="systemRefresh">전체 새로고침</button></div>
+    <div id="adminNotice" class="system-notice"></div>
+    <div class="system-grid">
+      <article class="system-card version-card"><div class="system-card-title"><h2>현재 버전</h2><span id="versionState" class="system-pill">확인 중</span></div><div id="versionDetails" class="system-card-body">버전 정보를 불러오는 중입니다.</div><ul id="updateCommits" class="commit-list"></ul><div class="system-buttons"><button id="checkUpdateBtn">업데이트 확인</button><button id="applyUpdateBtn" class="primary">최신 업데이트</button></div></article>
+      <article class="system-card"><div class="system-card-title"><h2>서버 재시작</h2><span id="serviceState" class="system-pill">확인 중</span></div><div id="serviceDetails" class="system-card-body">KREAMBOT 서비스를 확인합니다.</div><div class="system-buttons"><button id="restartServerBtn" class="danger">서버 재시작</button></div></article>
+      <article class="system-card"><div class="system-card-title"><h2>Chrome 연결 상태</h2><span id="chromeState" class="system-pill">확인 중</span></div><div id="chromeDetails" class="system-card-body">CDP 연결을 확인합니다.</div><div class="system-buttons"><button id="refreshChromeBtn">연결 다시 확인</button></div></article>
+      <article class="system-card backup-card"><div class="system-card-title"><h2>DB 백업</h2><span id="backupState" class="system-pill">-</span></div><div class="retention-row"><label>최대 보관 <input id="backupRetention" type="number" min="1" max="365" value="30">개</label><button id="saveRetentionBtn">설정 저장</button></div><div id="backupList" class="backup-list">백업 목록을 불러오는 중입니다.</div><div class="system-buttons"><button id="createBackupBtn" class="primary">지금 백업</button></div></article>
+      <article class="system-card"><div class="system-card-title"><h2>자동 업데이트</h2><span id="autoUpdateState" class="system-pill">OFF</span></div><div class="setting-list"><label><input id="autoUpdateEnabled" type="checkbox"> 자동 업데이트 사용</label><label>확인 시간 <input id="autoUpdateTime" type="time" value="04:00"></label><label><input id="autoApply" type="checkbox"> 업데이트 자동 적용</label><label><input id="deferWhenBusy" type="checkbox" checked> 작업 중이면 연기</label><label><input id="rollbackOnFailure" type="checkbox" checked> 실패 시 자동 롤백</label></div><div class="system-buttons"><button id="saveAutoUpdateBtn" class="primary">자동 업데이트 저장</button></div></article>
+      <article class="system-card history-card"><div class="system-card-title"><h2>업데이트 기록</h2><span id="historyCount" class="system-pill">0건</span></div><div id="updateHistory" class="history-list">기록을 불러오는 중입니다.</div></article>
+      <article class="system-card wide log-card"><div class="system-card-title"><h2>로그 보기</h2><span id="systemLogCount" class="system-pill">0줄</span></div><div class="log-controls"><select id="systemLogType"><option value="app">앱 로그</option><option value="update">업데이트 로그</option><option value="error">오류 로그</option><option value="inventory">판매목록 동기화 로그</option><option value="compare">가격 비교 로그</option></select><input id="systemLogSearch" placeholder="로그 검색"><label><input id="systemLogAuto" type="checkbox"> 자동 새로고침</label><button id="copySystemLog">전체 복사</button><button id="downloadSystemLog">다운로드</button><button id="deleteSystemLog" class="danger-text">로그 삭제</button></div><pre id="systemLogOutput">로그를 불러오는 중입니다.</pre></article>
+      <article class="system-card wide"><div class="system-card-title"><h2>시스템 정보</h2><span id="systemCheckedAt" class="system-pill">-</span></div><div id="systemInfo" class="info-grid">시스템 정보를 불러오는 중입니다.</div></article>
     </div>
-
-    <div class="result-box">
-        <h2>수정 대상</h2>
-
-        <table id="targetTable">
-            <thead>
-                <tr>
-                    <th>상품명</th>
-                    <th>옵션</th>
-                    <th>내 가격</th>
-                    <th>최저가</th>
-                    <th>차이</th>
-                </tr>
-            </thead>
-            <tbody></tbody>
-        </table>
-    </div>
-
-</div>
-
-<script src="script.js"></script>
-
-</body>
-</html>
+    <div id="systemMessage" class="system-message" aria-live="polite"></div>
+  </section>
+</main>
+<div id="versionFooter">KREAM BOT v- · -------</div>
+<dialog id="adminDialog"><form method="dialog"><h2>관리자 확인</h2><p>이 작업은 관리자 PIN이 필요합니다.</p><input id="adminPinInput" type="password" autocomplete="off" maxlength="128" placeholder="관리자 PIN"><div><button value="cancel">취소</button><button id="adminPinSubmit" value="confirm" class="primary">확인</button></div></form></dialog>
+<script src="script.js"></script><script src="system.js"></script>
+</body></html>

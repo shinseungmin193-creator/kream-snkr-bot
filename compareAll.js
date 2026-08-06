@@ -92,7 +92,15 @@ function getPricePlan(myPrice, bidRows) {
 }
 
 (async () => {
-  const keyword = process.argv[2] || '';
+  const args = process.argv.slice(2);
+  const keywordIndex = args.indexOf('--keyword');
+  const keyword = keywordIndex >= 0
+    ? String(args[keywordIndex + 1] || '')
+    : String(args[0] && !args[0].startsWith('--') ? args[0] : '');
+  const selectedIndex = args.indexOf('--stock-ids');
+  const selectedStockIds = selectedIndex >= 0
+    ? new Set(String(args[selectedIndex + 1] || '').split(',').map(value => value.trim()).filter(Boolean))
+    : null;
   const suffix = getFileSuffix(keyword);
 
   const inputFile =
@@ -105,7 +113,15 @@ function getPricePlan(myPrice, bidRows) {
       ? 'inventory_result.json'
       : `inventory_result_${suffix}.json`;
 
-  const items = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+  const allItems = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
+  const items = selectedStockIds
+    ? allItems.filter(item => selectedStockIds.has(String(item.stockId || '')))
+    : allItems;
+  if (selectedStockIds && items.length !== selectedStockIds.size) {
+    const found = new Set(items.map(item => String(item.stockId || '')));
+    const missing = [...selectedStockIds].filter(stockId => !found.has(stockId));
+    throw new Error(`선택 재고를 입력 파일에서 찾을 수 없음: ${missing.join(', ')}`);
+  }
   const results = [];
   let targetCount = 0;
 
@@ -114,6 +130,7 @@ function getPricePlan(myPrice, bidRows) {
   console.log(`검색어: ${keyword || '기본값'}`);
   console.log(`읽기 파일: ${inputFile}`);
   console.log(`저장 파일: ${outputFile}`);
+  if (selectedStockIds) console.log(`선택 재고 ${items.length}개만 가격 비교`);
   console.log('==============================');
 
   const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
@@ -268,6 +285,8 @@ function getPricePlan(myPrice, bidRows) {
       'utf8'
     );
 
+    console.log(`${itemIndex + 1}/${items.length} 가격 비교 완료`);
+
     await page.waitForTimeout(1000);
   }
 
@@ -278,4 +297,8 @@ function getPricePlan(myPrice, bidRows) {
   console.log('inventory_result.json 호환 저장 완료');
   console.log(`실시간 수정대상 발견: ${targetCount}개`);
   console.log('==============================');
+  // Disconnect this worker from the existing CDP session without closing the
+  // user's logged-in Chrome. Otherwise the Node event loop remains alive and
+  // the server never receives the child-process completion event.
+  process.exit(0);
 })();
