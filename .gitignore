@@ -12,3 +12,41 @@ data/system-settings.json
 data/system-config.json
 data/update-history.json
 data/system-update.lock
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+config/system-config.json
+
+# Databases and runtime state
+*.db
+*.db-wal
+*.db-shm
+*.pid
+*.log
+
+# Browser profiles, cookies, and sessions
+chrome-profile/
+chrome_profile/
+chrome-data/
+chrome_debug/
+user-data-dir/
+playwright/.auth/
+cookies/
+sessions/
+Cookies
+*.cookie
+*.cookies
+cookie*.json
+cookies*.json
+session*.json
+storage-state*.json
+auth-state*.json
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+tmp/
+temp/
