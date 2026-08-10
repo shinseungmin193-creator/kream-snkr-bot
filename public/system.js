@@ -62,30 +62,6 @@
   });
   window.addEventListener('hashchange', () => showSystemView(location.hash === '#system', location.hash || '#dashboard'));
 
-  async function requestAdminPin() {
-    const dialog = byId('adminDialog');
-    const input = byId('adminPinInput');
-    input.value = '';
-    dialog.returnValue = '';
-    dialog.showModal();
-    setTimeout(() => input.focus(), 0);
-    return new Promise(resolve => {
-      dialog.addEventListener('close', () => {
-        const value = dialog.returnValue === 'confirm' ? input.value : null;
-        input.value = '';
-        resolve(value);
-      }, { once: true });
-    });
-  }
-
-  async function adminApi(url, options = {}) {
-    const pin = await requestAdminPin();
-    if (pin === null) throw new Error('관리자 작업이 취소되었습니다.');
-    const headers = new Headers(options.headers || {});
-    headers.set('X-KREAM-ADMIN-PIN', pin);
-    return api(url, { ...options, headers });
-  }
-
   function renderVersion(version) {
     systemState.version = version;
     byId('versionFooter').textContent = `KREAM BOT v${version.appVersion} · ${version.currentCommitShort || '-------'}`;
@@ -112,13 +88,7 @@
   }
 
   function updateDangerousControls() {
-    const configured = systemState.status?.adminPinConfigured === true;
-    const blocked = !configured;
-    ['restartServerBtn', 'saveAutoUpdateBtn', 'deleteSystemLog', 'saveRetentionBtn'].forEach(id => { byId(id).disabled = blocked; });
-    byId('applyUpdateBtn').disabled = blocked || systemState.version?.dirty === true || systemState.status?.updateInProgress === true;
-    const notice = byId('adminNotice');
-    notice.classList.toggle('show', blocked);
-    notice.textContent = blocked ? '위험 작업이 잠겨 있습니다. NSSM 서비스 환경에 KREAM_SYSTEM_ADMIN_PIN을 설정한 뒤 서비스를 재시작하세요.' : '';
+    byId('applyUpdateBtn').disabled = systemState.version?.dirty === true || systemState.status?.updateInProgress === true;
   }
 
   async function loadStatus() {
@@ -151,7 +121,7 @@
       document.querySelectorAll('[data-backup-download]').forEach(button => button.onclick = () => { location.href = `/api/system/backups/${button.dataset.backupDownload}/download`; });
       document.querySelectorAll('[data-backup-delete]').forEach(button => button.onclick = async () => {
         if (!confirm('이 백업 파일을 삭제하시겠습니까?')) return;
-        try { await adminApi(`/api/system/backups/${button.dataset.backupDelete}`, { method: 'DELETE' }); message('백업을 삭제했습니다.'); await loadBackups(); }
+        try { await api(`/api/system/backups/${button.dataset.backupDelete}`, { method: 'DELETE' }); message('백업을 삭제했습니다.'); await loadBackups(); }
         catch (error) { message(error.message, true); }
       });
     } catch (error) { setPill('backupState', '확인 실패', 'error'); message(`백업 조회 실패: ${error.message}`, true); }
@@ -229,7 +199,7 @@
     if (!confirm('DB와 중요 파일을 백업한 뒤 최신 버전으로 업데이트하고 KREAMBOT 서비스를 재시작합니다. 계속하시겠습니까?')) return;
     try {
       const previousUptime = systemState.status?.uptimeSeconds || 0;
-      const result = await adminApi('/api/system/apply-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const result = await api('/api/system/apply-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       message(result.message);
       waitForServerRestart(previousUptime, '업데이트 및 서버 재시작');
     } catch (error) { message(error.message, true); }
@@ -238,7 +208,7 @@
     if (!confirm('KREAMBOT 서비스를 재시작하시겠습니까? 진행 중인 자동화 작업이 있으면 차단됩니다.')) return;
     try {
       const previousUptime = systemState.status?.uptimeSeconds || 0;
-      const result = await adminApi('/api/system/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const result = await api('/api/system/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       message(result.message);
       waitForServerRestart(previousUptime, '서버 재시작');
     } catch (error) { message(error.message, true); }
@@ -248,7 +218,7 @@
     catch (error) { setPill('backupState', '실패', 'error'); message(error.message, true); }
   };
   byId('saveRetentionBtn').onclick = async () => {
-    try { await adminApi('/api/system/backups/retention', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ retention: Number(byId('backupRetention').value) }) }); message('백업 보관 설정을 저장했습니다.'); await loadBackups(); }
+    try { await api('/api/system/backups/retention', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ retention: Number(byId('backupRetention').value) }) }); message('백업 보관 설정을 저장했습니다.'); await loadBackups(); }
     catch (error) { message(error.message, true); }
   };
   byId('systemLogType').onchange = loadLogs;
@@ -265,7 +235,7 @@
   byId('downloadSystemLog').onclick = () => { location.href = `/api/system/logs/download?type=${encodeURIComponent(byId('systemLogType').value)}`; };
   byId('deleteSystemLog').onclick = async () => {
     if (!confirm('선택한 로그 파일의 내용을 삭제하시겠습니까?')) return;
-    try { await adminApi(`/api/system/logs/${encodeURIComponent(byId('systemLogType').value)}`, { method: 'DELETE' }); message('로그를 삭제했습니다.'); await loadLogs(); }
+    try { await api(`/api/system/logs/${encodeURIComponent(byId('systemLogType').value)}`, { method: 'DELETE' }); message('로그를 삭제했습니다.'); await loadLogs(); }
     catch (error) { message(error.message, true); }
   };
   byId('saveAutoUpdateBtn').onclick = async () => {
@@ -276,7 +246,7 @@
       deferWhenBusy: byId('deferWhenBusy').checked,
       rollbackOnFailure: byId('rollbackOnFailure').checked
     };
-    try { const { settings } = await adminApi('/api/system/auto-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); setPill('autoUpdateState', settings.autoUpdateEnabled ? 'ON' : 'OFF', settings.autoUpdateEnabled ? 'ok' : ''); message('자동 업데이트 설정을 저장했습니다.'); }
+    try { const { settings } = await api('/api/system/auto-update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); setPill('autoUpdateState', settings.autoUpdateEnabled ? 'ON' : 'OFF', settings.autoUpdateEnabled ? 'ok' : ''); message('자동 업데이트 설정을 저장했습니다.'); }
     catch (error) { message(error.message, true); }
   };
 

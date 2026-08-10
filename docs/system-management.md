@@ -35,16 +35,11 @@
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\system-check.ps1'
    ```
 
-## 관리자 PIN 설정
+## 관리 작업 확인
 
-업데이트, 서비스 재시작, 로그·백업 삭제, 자동 업데이트 변경은 `KREAM_SYSTEM_ADMIN_PIN`이 설정돼야 실행됩니다. PIN이 없으면 읽기 전용 시스템 정보와 DB 백업 생성만 사용할 수 있고 위험 작업은 서버에서 차단됩니다.
+관리자 PIN과 PIN 환경변수는 사용하지 않습니다. 작업 중지는 확인창의 `작업 중지`를 누르면 현재 Playwright 작업을 안전 종료하고 대기열 전체를 취소합니다. 업데이트, 서비스 재시작, 로그·백업 삭제 등은 각 화면의 확인 문구를 확인한 뒤 실행하십시오.
 
-PIN은 소스, JSON 설정, 브라우저 저장소에 기록하지 마십시오. 다음 중 하나를 사용합니다.
-
-- Windows **시스템 환경 변수**에 `KREAM_SYSTEM_ADMIN_PIN`을 추가한 뒤 KREAMBOT 서비스를 재시작합니다.
-- `nssm edit KREAMBOT`의 Environment 탭에서 서비스 전용 환경변수로 추가합니다.
-
-PIN은 요청 헤더로만 서버에 전달되고 로그에 기록되지 않습니다. 15분 안에 5회 실패하면 해당 접속 주소의 관리자 인증을 15분간 잠급니다.
+서버는 신뢰할 수 있는 사내망에서만 접근하도록 Windows 방화벽과 네트워크를 관리하십시오.
 
 ## GitHub 업데이트 준비
 
@@ -125,4 +120,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\restart-servi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\uninstall-service.ps1' -ConfirmRemoval KREAMBOT
 ```
 
-Windows 재설치 후에는 저장소 clone, Node.js·NSSM 설치, `data\kream-bot.db`와 필요한 로컬 설정 복원, 관리자 PIN 및 Git 인증 재설정, 서비스 등록, Chrome 로그인 순서로 복구합니다.
+Windows 재설치 후에는 저장소 clone, Node.js·NSSM 설치, `data\kream-bot.db`와 필요한 로컬 설정 복원, Git 인증 재설정, 서비스 등록, Chrome 로그인 순서로 복구합니다.

@@ -2,9 +2,10 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const inventoryDb = require('./database');
-const { spawn, exec } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { chromium } = require('playwright');
 const fileLogger = require('./system/file-logger');
+const { TaskQueue, DuplicateTaskError, TaskNotFoundError, QueueStoppingError, STATUS: QUEUE_STATUS } = require('./system/task-queue');
 const {
     SystemManager,
     readSettings,
@@ -14,6 +15,7 @@ const {
 } = require('./system/system-manager');
 
 const app = express();
+const taskQueue = new TaskQueue({ recentLimit: 50 });
 
 app.use(express.static(path.join(__dirname, 'public'), {
     etag: false,
@@ -30,13 +32,14 @@ let currentChild = null;
 let currentPage = null;
 let currentBrowser = null;
 let currentJobName = null;
+let stopAllPromise = null;
 
 const systemManager = new SystemManager({
     inventoryDb,
     chromium,
     getJobState: () => ({
-        busy: Boolean(currentChild || currentPage),
-        name: currentJobName || (currentPage ? 'KREAM 재고 수정' : null),
+        busy: Boolean(taskQueue.current || taskQueue.pending.length || currentChild || currentPage),
+        name: taskQueue.current?.label || taskQueue.pending[0]?.label || currentJobName || (currentPage ? 'KREAM 재고 수정' : null),
         childPid: currentChild?.pid || null
     })
 });
@@ -75,6 +78,34 @@ function sendSpecial(text) {
     sendSse(text);
 }
 
+function sendQueueState(snapshot = taskQueue.getSnapshot()) {
+    const base64 = Buffer.from(JSON.stringify(snapshot), 'utf8').toString('base64');
+    sendSpecial(`__QUEUE_STATE_B64__:${base64}`);
+}
+
+function requestIpFrom(req) {
+    return String(req.ip || req.socket?.remoteAddress || 'unknown').trim().slice(0, 80);
+}
+
+function enqueueAutomation(req, res, options) {
+    try {
+        const job = taskQueue.enqueue({
+            type: options.type,
+            label: options.label,
+            requestIp: requestIpFrom(req),
+            metadata: options.metadata || {},
+            run: options.run,
+            onCancel: requestStop
+        });
+        return res.status(202).json({ success: true, queued: true, job });
+    } catch (error) {
+        if (error instanceof DuplicateTaskError || error instanceof QueueStoppingError) {
+            return res.status(409).json({ success: false, code: error.code, message: error.message });
+        }
+        throw error;
+    }
+}
+
 function resetStop() {
     stopRequested = false;
 }
@@ -87,13 +118,19 @@ function requestStop() {
 
     stopRequested = true;
 
-    sendLog('🛑 전체 작업 중지 요청 수신');
     sendSpecial('__STOP_REQUESTED__');
 
     if (currentChild && currentChild.pid) {
+        const childToStop = currentChild;
+        const childPid = childToStop.pid;
         try {
-            exec(`taskkill /pid ${currentChild.pid} /T /F`, () => {});
-            sendLog(`실행중인 node 작업 종료 요청: pid=${currentChild.pid}`);
+            const killSent = childToStop.kill();
+            sendLog(`실행중인 node 작업 직접 종료 요청: pid=${childPid}, sent=${killSent}`);
+            if (process.platform === 'win32') {
+                execFile('taskkill.exe', ['/PID', String(childPid), '/T', '/F'], { windowsHide: true }, error => {
+                    if (error && !childToStop.killed) sendLog(`child 프로세스 트리 종료 실패: pid=${childPid}, ${error.message}`);
+                });
+            }
         } catch (err) {
             sendLog('child 종료 실패: ' + err.message);
         }
@@ -107,6 +144,14 @@ function requestStop() {
         sendLog('현재 Playwright 페이지 종료 요청');
     }
 }
+
+taskQueue.on('registered', job => sendLog(`Queue 등록: ${job.label}`));
+taskQueue.on('started', job => sendLog(`Queue 시작: ${job.label} (${job.id})`));
+taskQueue.on('completed', job => sendLog(`Queue 완료: ${job.label} (${job.durationSeconds}초)`));
+taskQueue.on('failed', job => sendLog(`Queue 실패: ${job.label} - ${job.error || '알 수 없는 오류'}`));
+taskQueue.on('canceled', job => sendLog(`Queue 취소: ${job.label}`));
+taskQueue.on('cancel-requested', job => sendLog(`Queue 안전 종료 요청: ${job.label}`));
+taskQueue.on('changed', snapshot => sendQueueState(snapshot));
 
 function checkStop() {
     if (stopRequested) {
@@ -197,13 +242,15 @@ app.get('/logs', (req, res) => {
     res.write(`data: 로그 연결됨\n\n`);
 
     clients.push(res);
+    const queueState = Buffer.from(JSON.stringify(taskQueue.getSnapshot()), 'utf8').toString('base64');
+    res.write(`data: __QUEUE_STATE_B64__:${queueState}\n\n`);
 
     req.on('close', () => {
         clients = clients.filter(client => client !== res);
     });
 });
 
-function runScript(scriptName, args = []) {
+function runScript(scriptName, args = [], onLine = null) {
     return new Promise((resolve, reject) => {
         checkStop();
 
@@ -232,6 +279,7 @@ function runScript(scriptName, args = []) {
 
             lines.forEach(line => {
                 handleScriptLine(line, logType);
+                if (typeof onLine === 'function') onLine(line);
             });
         });
 
@@ -250,6 +298,7 @@ function runScript(scriptName, args = []) {
         currentChild.on('close', code => {
             if (stdoutBuffer.trim()) {
                 handleScriptLine(stdoutBuffer, logType);
+                if (typeof onLine === 'function') onLine(stdoutBuffer);
             }
 
             if (stderrBuffer.trim()) {
@@ -687,86 +736,181 @@ async function openKreamStockEdit(stockId, newPrice) {
     }
 }
 
-app.get('/run/pokemon', async (req, res) => {
-    try {
-        resetStop();
-
-        await runKreamFlow('포켓몬');
-
-        res.json({
-            success: true,
-            redirect: '/target_view.html?type=pokemon'
-        });
-
-    } catch (err) {
-        if (isStopError(err)) {
-            sendLog('작업 중지 : ' + STOP_MESSAGE);
-            return sendStoppedResponse(res);
+function inventoryProgressReporter(context) {
+    let current = 0;
+    let total = 0;
+    return line => {
+        const text = String(line || '');
+        const totalMatch = text.match(/판매중 재고\s*(\d+)개/);
+        const cumulativeMatch = text.match(/누적:\s*(\d+)개/);
+        const savedMatch = text.match(/총\s*(\d+)개 저장 완료/);
+        const pageMatch = text.match(/(\d+)\/(\d+)\s*페이지 수집 완료/);
+        if (totalMatch) total = Number(totalMatch[1]);
+        if (cumulativeMatch) current = Number(cumulativeMatch[1]);
+        if (savedMatch) {
+            current = Number(savedMatch[1]);
+            total = total || current;
         }
-
-        sendLog('작업 실패 : ' + err.message);
-
-        res.status(500).json({
-            success: false,
-            message: err.message
-        });
-    }
-});
-
-app.get('/run/onepiece', async (req, res) => {
-    try {
-        resetStop();
-
-        await runKreamFlow('원피스');
-
-        res.json({
-            success: true,
-            redirect: '/target_view.html?type=onepiece'
-        });
-
-    } catch (err) {
-        if (isStopError(err)) {
-            sendLog('작업 중지 : ' + STOP_MESSAGE);
-            return sendStoppedResponse(res);
+        if (total > 0 && (totalMatch || cumulativeMatch || savedMatch)) {
+            context.reportProgress({ current, total, message: `판매목록 ${current} / ${total}` });
+        } else if (pageMatch) {
+            context.reportProgress({
+                current: Number(pageMatch[1]),
+                total: Number(pageMatch[2]),
+                message: `${pageMatch[1]} / ${pageMatch[2]} 페이지 수집`
+            });
         }
+    };
+}
 
-        sendLog('작업 실패 : ' + err.message);
+function compareProgressReporter(context, totalHint) {
+    return line => {
+        const match = String(line || '').match(/(\d+)\/(\d+)\s*가격 비교 완료/);
+        if (!match) return;
+        const current = Number(match[1]);
+        const total = Number(match[2]) || totalHint || 0;
+        context.reportProgress({ current, total, message: `${current} / ${total} 가격 비교` });
+    };
+}
 
-        res.status(500).json({
-            success: false,
-            message: err.message
-        });
-    }
-});
+function inventoryRowsForCompare(rows) {
+    return rows.map(item => ({
+        ...item,
+        koreanName: item.productName,
+        option: item.optionName,
+        sellPrice: item.currentPrice,
+        productCode: item.productId ? `(${item.productId})` : ''
+    }));
+}
 
-app.get('/run/all', async (req, res) => {
+async function executeInventorySync(context) {
+    resetStop();
+    sendLog('판매목록 동기화 시작');
     try {
-        resetStop();
-
-        await runKreamFlow('포켓몬');
-
+        await runScript('inventory.js', ['--sync-all'], inventoryProgressReporter(context));
+        context.throwIfCancellationRequested();
         checkStop();
+        const filePath = path.join(__dirname, 'inventory_all.json');
+        const items = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const counts = inventoryDb.upsertInventory(items, true);
+        inventoryDb.addHistory('INVENTORY_SYNC', 'SUCCESS', { total: items.length, ...counts });
+        context.reportProgress({ current: items.length, total: items.length, message: `총 ${items.length}개 저장 완료` });
+        sendLog(`${counts.success}개 동기화 완료 / 실패 ${counts.failure}개`);
+        sendSpecial('__INVENTORY_REFRESH__');
+        return { total: items.length, ...counts };
+    } catch (error) {
+        if (!isStopError(error)) inventoryDb.addHistory('INVENTORY_SYNC', 'FAILED', {}, error.message);
+        throw error;
+    }
+}
 
-        await runKreamFlow('원피스');
+async function executeFullCompare(context) {
+    resetStop();
+    sendLog('가격 비교 시작');
+    const active = inventoryDb.db.prepare("SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' ORDER BY id").all();
+    fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(inventoryRowsForCompare(active), null, 2));
+    context.reportProgress({ current: 0, total: active.length, message: `전체 재고 ${active.length}개 가격 비교 시작` });
+    await runScript('compareAll.js', [''], compareProgressReporter(context, active.length));
+    context.throwIfCancellationRequested();
+    checkStop();
+    const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+    const counts = inventoryDb.applyComparison(results);
+    inventoryDb.addHistory('PRICE_COMPARE', 'SUCCESS', { total: results.length, success: results.length - counts.failures, failure: counts.failures });
+    context.reportProgress({ current: results.length, total: results.length, message: `가격 비교 ${results.length}개 완료` });
+    sendLog(`가격 비교 완료: 수정 대상 ${counts.targets}개 / 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
+    sendSpecial('__TARGETS_REFRESH__');
+    return { total: results.length, ...counts };
+}
 
-        res.json({
-            success: true,
-            redirect: '/target_view.html?type=pokemon'
-        });
+async function executeSelectedCompare(stockIds, selected, context) {
+    resetStop();
+    sendLog(`선택 재고 ${stockIds.length}개 가격 비교 시작`);
+    fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(inventoryRowsForCompare(selected), null, 2));
+    context.reportProgress({ current: 0, total: stockIds.length, message: `선택 재고 ${stockIds.length}개 가격 비교 시작` });
+    await runScript('compareAll.js', ['--stock-ids', stockIds.join(',')], compareProgressReporter(context, stockIds.length));
+    context.throwIfCancellationRequested();
+    checkStop();
+    const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+    const processedIds = new Set(results.map(item => String(item.stockId || '')));
+    if (results.length !== stockIds.length || stockIds.some(stockId => !processedIds.has(stockId))) {
+        throw new Error(`선택 비교 결과 불일치: 요청 ${stockIds.length}개, 처리 ${results.length}개`);
+    }
+    const counts = inventoryDb.applyComparison(results);
+    inventoryDb.addHistory('PRICE_COMPARE_SELECTED', 'SUCCESS', {
+        total: results.length,
+        success: results.length - counts.failures,
+        failure: counts.failures
+    });
+    context.reportProgress({ current: results.length, total: results.length, message: `선택 재고 ${results.length}개 가격 비교 완료` });
+    sendLog(`선택 재고 ${stockIds.length}개 가격 비교 완료`);
+    sendSpecial('__TARGETS_REFRESH__');
+    return { total: results.length, stockIds, processedStockIds: [...processedIds], ...counts };
+}
 
-    } catch (err) {
-        if (isStopError(err)) {
-            sendLog('전체 실행 중지 : ' + STOP_MESSAGE);
-            return sendStoppedResponse(res);
+async function executePriceUpdates(items, context) {
+    resetStop();
+    let success = 0;
+    let failure = 0;
+    context.reportProgress({ current: 0, total: items.length, message: `가격 수정 ${items.length}개 시작` });
+    for (let index = 0; index < items.length; index++) {
+        context.throwIfCancellationRequested();
+        const { stockId, newPrice } = items[index];
+        try {
+            await openKreamStockEdit(stockId, newPrice);
+            inventoryDb.markUpdate(stockId, 'COMPLETED', null, newPrice);
+            success++;
+            sendLog(`가격 수정 완료: stockId=${stockId}`);
+        } catch (error) {
+            if (isStopError(error) || context.isCancellationRequested()) throw error;
+            failure++;
+            inventoryDb.markUpdate(stockId, 'FAILED', error.message);
+            sendLog(`가격 수정 실패: stockId=${stockId}, ${error.message}`);
         }
-
-        sendLog('전체 실행 실패 : ' + err.message);
-
-        res.status(500).json({
-            success: false,
-            message: err.message
+        context.reportProgress({
+            current: index + 1,
+            total: items.length,
+            message: `${index + 1} / ${items.length} 가격 수정`
         });
     }
+    sendSpecial('__TARGETS_REFRESH__');
+    sendSpecial('__INVENTORY_REFRESH__');
+    return { total: items.length, success, failure };
+}
+
+async function executeLegacyFlow(keywords, context) {
+    resetStop();
+    const list = Array.isArray(keywords) ? keywords : [keywords];
+    for (let index = 0; index < list.length; index++) {
+        context.throwIfCancellationRequested();
+        context.reportProgress({ current: index, total: list.length, message: `${list[index]} 실행 중` });
+        await runKreamFlow(list[index]);
+        context.reportProgress({ current: index + 1, total: list.length, message: `${list[index]} 완료` });
+    }
+    return { total: list.length };
+}
+
+app.get('/run/pokemon', (req, res) => {
+    return enqueueAutomation(req, res, {
+        type: 'legacy-pokemon',
+        label: '포켓몬 실행',
+        run: context => executeLegacyFlow('포켓몬', context)
+    });
+});
+
+app.get('/run/onepiece', (req, res) => {
+    return enqueueAutomation(req, res, {
+        type: 'legacy-onepiece',
+        label: '원피스 실행',
+        run: context => executeLegacyFlow('원피스', context)
+    });
+});
+
+app.get('/run/all', (req, res) => {
+    return enqueueAutomation(req, res, {
+        type: 'legacy-all',
+        label: '기존 전체 실행',
+        run: context => executeLegacyFlow(['포켓몬', '원피스'], context)
+    });
 });
 
 app.get('/api/targets', (req, res) => {
@@ -801,10 +945,8 @@ app.get('/api/targets', (req, res) => {
     }
 });
 
-app.get('/api/open-stock-edit', async (req, res) => {
+app.get('/api/open-stock-edit', (req, res) => {
     try {
-        resetStop();
-
         const stockId = String(req.query.stockId || '').trim();
         const newPrice = parsePrice(req.query.newPrice);
 
@@ -822,23 +964,13 @@ app.get('/api/open-stock-edit', async (req, res) => {
             });
         }
 
-        await openKreamStockEdit(stockId, newPrice);
-        inventoryDb.markUpdate(stockId, 'COMPLETED', null, newPrice);
-
-        res.json({
-            success: true,
-            stockId,
-            newPrice
+        return enqueueAutomation(req, res, {
+            type: 'price-update',
+            label: '판매가 수정',
+            metadata: { count: 1 },
+            run: context => executePriceUpdates([{ stockId, newPrice }], context)
         });
-
     } catch (err) {
-        if (isStopError(err)) {
-            sendLog('재고 수정 중지 : ' + STOP_MESSAGE);
-            return sendStoppedResponse(res);
-        }
-
-        sendLog('재고 수정 실패 : ' + err.message);
-
         res.status(500).json({
             success: false,
             message: err.message
@@ -846,15 +978,7 @@ app.get('/api/open-stock-edit', async (req, res) => {
     }
 });
 
-app.get('/api/stop', (req, res) => {
-    requestStop();
-
-    res.json({
-        success: true,
-        stopped: true,
-        message: '전체 작업 중지 요청 완료'
-    });
-});
+app.get('/api/stop', express.json(), stopAllQueueTasks);
 
 // KREAM BOT v2 DB-backed inventory API. Existing automation endpoints above remain compatible.
 app.get('/api/inventory', (req, res) => {
@@ -894,55 +1018,28 @@ app.post('/api/inventory/lower-prices', express.json(), (req, res) => {
     }
 });
 
-app.post('/api/inventory/sync', async (req, res) => {
-    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
-    try {
-        resetStop(); sendLog('판매목록 동기화 시작');
-        // Dedicated all-inventory mode. Never reuse the Pokemon/One Piece keyword path.
-        await runScript('inventory.js', ['--sync-all']); checkStop();
-        const filePath = path.join(__dirname, 'inventory_all.json');
-        const items = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        const counts = inventoryDb.upsertInventory(items, true);
-        inventoryDb.addHistory('INVENTORY_SYNC', 'SUCCESS', { total: items.length, ...counts });
-        sendLog(`${counts.success}개 동기화 완료 / 실패 ${counts.failure}개`);
-        sendSpecial('__INVENTORY_REFRESH__');
-        res.json({ success: true, total: items.length, ...counts });
-    } catch (err) {
-        if (isStopError(err)) return sendStoppedResponse(res);
-        inventoryDb.addHistory('INVENTORY_SYNC', 'FAILED', {}, err.message);
-        sendLog(`판매목록 동기화 실패: ${err.message}`);
-        res.status(500).json({ success: false, message: err.message });
-    }
+app.post('/api/inventory/sync', express.json(), (req, res) => {
+    return enqueueAutomation(req, res, {
+        type: 'inventory-sync',
+        label: '판매목록 동기화',
+        run: executeInventorySync
+    });
 });
 
-app.post('/api/inventory/compare', async (req, res) => {
-    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
-    try {
-        resetStop(); sendLog('가격 비교 시작');
-        const active = inventoryDb.db.prepare("SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' ORDER BY id").all();
-        fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(active.map(i => ({...i,koreanName:i.productName,option:i.optionName,sellPrice:i.currentPrice,productCode:i.productId ? `(${i.productId})` : ''})), null, 2));
-        await runScript('compareAll.js', ['']); checkStop();
-        const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
-        const counts = inventoryDb.applyComparison(results);
-        inventoryDb.addHistory('PRICE_COMPARE', 'SUCCESS', { total: results.length, success: results.length-counts.failures, failure: counts.failures });
-        sendLog(`가격 비교 완료: 수정 대상 ${counts.targets}개 / 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
-        sendSpecial('__TARGETS_REFRESH__');
-        res.json({ success: true, total: results.length, ...counts });
-    } catch (err) {
-        if (isStopError(err)) return sendStoppedResponse(res);
-        sendLog(`가격 비교 실패: ${err.message}`); res.status(500).json({ success: false, message: err.message });
-    }
+app.post('/api/inventory/compare', express.json(), (req, res) => {
+    return enqueueAutomation(req, res, {
+        type: 'price-compare-all',
+        label: '전체 가격 비교',
+        run: executeFullCompare
+    });
 });
 
-app.post('/api/compare-selected', express.json(), async (req, res) => {
-    if (currentChild) return res.status(409).json({ success: false, message: '다른 작업이 진행 중입니다.' });
-
+app.post('/api/compare-selected', express.json(), (req, res) => {
     const stockIds = [...new Set((Array.isArray(req.body?.stockIds) ? req.body.stockIds : [])
         .map(value => String(value || '').trim()).filter(Boolean))];
     if (!stockIds.length) return res.status(400).json({ success: false, message: '가격 비교할 재고를 선택하세요.' });
 
     try {
-        resetStop();
         const placeholders = stockIds.map(() => '?').join(',');
         const selected = inventoryDb.db.prepare(
             `SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' AND stockId IN (${placeholders})`
@@ -952,44 +1049,94 @@ app.post('/api/compare-selected', express.json(), async (req, res) => {
             const missing = stockIds.filter(stockId => !found.has(stockId));
             return res.status(400).json({ success: false, message: `판매중 재고를 찾을 수 없습니다: ${missing.join(', ')}` });
         }
-
-        sendLog(`선택 재고 ${stockIds.length}개 가격 비교 시작`);
-        fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(selected.map(i => ({
-            ...i, koreanName: i.productName, option: i.optionName, sellPrice: i.currentPrice,
-            productCode: i.productId ? `(${i.productId})` : ''
-        })), null, 2));
-
-        await runScript('compareAll.js', ['--stock-ids', stockIds.join(',')]);
-        checkStop();
-        const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
-        const processedIds = new Set(results.map(item => String(item.stockId || '')));
-        if (results.length !== stockIds.length || stockIds.some(stockId => !processedIds.has(stockId))) {
-            throw new Error(`선택 비교 결과 불일치: 요청 ${stockIds.length}개, 처리 ${results.length}개`);
-        }
-
-        const counts = inventoryDb.applyComparison(results);
-        inventoryDb.addHistory('PRICE_COMPARE_SELECTED', 'SUCCESS', {
-            total: results.length, success: results.length - counts.failures, failure: counts.failures
+        return enqueueAutomation(req, res, {
+            type: 'price-compare-selected',
+            label: '선택 가격 비교',
+            metadata: { count: stockIds.length },
+            run: context => executeSelectedCompare(stockIds, selected, context)
         });
-        sendLog(`선택 재고 ${stockIds.length}개 가격 비교 완료`);
-        sendSpecial('__TARGETS_REFRESH__');
-        res.json({ success: true, total: results.length, stockIds, processedStockIds: [...processedIds], ...counts });
     } catch (err) {
-        if (isStopError(err)) return sendStoppedResponse(res);
         sendLog(`선택 재고 가격 비교 실패: ${err.message}`);
         res.status(500).json({ success: false, message: err.message });
     }
 });
 
-// System management APIs are isolated from the existing inventory routes above.
-function requireSystemAdmin(req, res, next) {
-    const verification = systemManager.adminPin.verify(req.ip, req.get('x-kream-admin-pin'));
-    if (!verification.ok) {
-        fileLogger.write('error', `관리자 인증 실패: ip=${req.ip}, status=${verification.status}`);
-        return res.status(verification.status).json({ success: false, message: verification.message });
+app.post('/api/inventory/update-prices', express.json(), (req, res) => {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items = rawItems.map(item => ({
+        stockId: String(item?.stockId || '').trim(),
+        newPrice: parsePrice(item?.newPrice ?? item?.targetPrice)
+    }));
+    if (!items.length) return res.status(400).json({ success: false, message: '가격 수정 대상이 없습니다.' });
+    if (items.some(item => !item.stockId || !item.newPrice)) {
+        return res.status(400).json({ success: false, message: 'stockId 또는 수정 가격이 올바르지 않습니다.' });
     }
-    next();
+    if (new Set(items.map(item => item.stockId)).size !== items.length) {
+        return res.status(400).json({ success: false, message: '중복된 stockId가 있습니다.' });
+    }
+    return enqueueAutomation(req, res, {
+        type: 'price-update',
+        label: items.length === 1 ? '판매가 수정' : '전체 자동수정',
+        metadata: { count: items.length },
+        run: context => executePriceUpdates(items, context)
+    });
+});
+
+app.get('/api/queue', (req, res) => {
+    res.json({ success: true, queue: taskQueue.getSnapshot() });
+});
+
+async function cancelQueueJobById(req, res, id) {
+    try {
+        const job = taskQueue.get(String(id || ''));
+        if (!job || ![QUEUE_STATUS.WAITING, QUEUE_STATUS.RUNNING].includes(job.status)) {
+            return res.status(404).json({ success: false, message: '취소할 작업을 찾을 수 없습니다.' });
+        }
+        const canceled = await taskQueue.cancel(job.id);
+        return res.json({ success: true, job: canceled });
+    } catch (error) {
+        if (error instanceof TaskNotFoundError) {
+            return res.status(404).json({ success: false, message: error.message });
+        }
+        return systemApiError(res, error);
+    }
 }
+
+async function cancelQueueJob(req, res) {
+    return cancelQueueJobById(req, res, req.params.id);
+}
+
+async function stopAllQueueTasks(req, res) {
+    if (stopAllPromise) {
+        try {
+            await stopAllPromise;
+            return res.json({ success: true, message: '작업 중지 완료', queue: taskQueue.getSnapshot() });
+        } catch (error) {
+            return systemApiError(res, error);
+        }
+    }
+
+    const before = taskQueue.getSnapshot();
+    sendLog('작업 중지 요청');
+    if (before.current) sendLog('현재 작업 취소');
+    sendLog(`대기열 ${before.waiting.length}개 제거`);
+
+    stopAllPromise = taskQueue.cancelAll();
+    try {
+        const result = await stopAllPromise;
+        sendLog('작업 중지 완료');
+        sendSpecial('__INVENTORY_REFRESH__');
+        sendSpecial('__TARGETS_REFRESH__');
+        return res.json({ success: true, message: '작업 중지 완료', result, queue: taskQueue.getSnapshot() });
+    } catch (error) {
+        sendLog(`작업 중지 실패: ${error.message}`);
+        return systemApiError(res, error);
+    } finally {
+        stopAllPromise = null;
+    }
+}
+
+app.post('/api/queue/:id/cancel', express.json(), cancelQueueJob);
 
 function systemApiError(res, error, status = 500) {
     const message = maskText(error?.message || error || '시스템 작업에 실패했습니다.').slice(0, 500);
@@ -1015,7 +1162,7 @@ app.post('/api/system/check-update', async (req, res) => {
     } catch (error) { systemApiError(res, error); }
 });
 
-app.post('/api/system/apply-update', express.json(), requireSystemAdmin, async (req, res) => {
+app.post('/api/system/apply-update', express.json(), async (req, res) => {
     try {
         const version = await systemManager.getVersion(false);
         if (version.dirty) return res.status(409).json({ success: false, message: '로컬 변경사항이 있어 안전을 위해 업데이트를 차단했습니다. 변경사항을 커밋하거나 정리한 뒤 다시 시도하세요.' });
@@ -1024,7 +1171,7 @@ app.post('/api/system/apply-update', express.json(), requireSystemAdmin, async (
     } catch (error) { systemApiError(res, error, /진행 중|작업/.test(error.message) ? 409 : 500); }
 });
 
-app.post('/api/system/restart', express.json(), requireSystemAdmin, (req, res) => {
+app.post('/api/system/restart', express.json(), (req, res) => {
     try {
         const result = systemManager.requestRestart();
         res.status(202).json({ success: true, accepted: result.accepted, message: '서비스 재시작 요청을 접수했습니다.' });
@@ -1054,7 +1201,7 @@ app.get('/api/system/logs/download', (req, res) => {
     } catch (error) { systemApiError(res, error, 400); }
 });
 
-app.delete('/api/system/logs/:type', requireSystemAdmin, (req, res) => {
+app.delete('/api/system/logs/:type', (req, res) => {
     try {
         fileLogger.clear(String(req.params.type));
         res.json({ success: true, message: '로그를 삭제했습니다.' });
@@ -1081,12 +1228,12 @@ app.get('/api/system/backups/:name/download', (req, res) => {
     } catch (error) { systemApiError(res, error, 404); }
 });
 
-app.delete('/api/system/backups/:name', requireSystemAdmin, (req, res) => {
+app.delete('/api/system/backups/:name', (req, res) => {
     try { res.json({ success: true, name: systemManager.deleteBackup(req.params.name) }); }
     catch (error) { systemApiError(res, error, 400); }
 });
 
-app.post('/api/system/backups/retention', express.json(), requireSystemAdmin, (req, res) => {
+app.post('/api/system/backups/retention', express.json(), (req, res) => {
     try { res.json({ success: true, settings: systemManager.updateBackupRetention(req.body?.retention) }); }
     catch (error) { systemApiError(res, error, 400); }
 });
@@ -1100,7 +1247,7 @@ app.get('/api/system/auto-update', (req, res) => {
     res.json({ success: true, settings: readSettings() });
 });
 
-app.post('/api/system/auto-update', express.json(), requireSystemAdmin, async (req, res) => {
+app.post('/api/system/auto-update', express.json(), async (req, res) => {
     try {
         const allowed = ['autoUpdateEnabled', 'autoUpdateTime', 'autoApply', 'deferWhenBusy', 'rollbackOnFailure'];
         const input = Object.fromEntries(allowed.filter(key => Object.prototype.hasOwnProperty.call(req.body || {}, key)).map(key => [key, req.body[key]]));
@@ -1109,7 +1256,7 @@ app.post('/api/system/auto-update', express.json(), requireSystemAdmin, async (r
     } catch (error) { systemApiError(res, error, 400); }
 });
 
-app.post('/api/stop', (req, res) => { requestStop(); res.json({ success: true, stopped: true }); });
+app.post('/api/stop', express.json(), stopAllQueueTasks);
 
 app.listen(systemConfig.PORT, () => {
     console.log('========================');

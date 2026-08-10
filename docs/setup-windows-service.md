@@ -232,4 +232,4 @@ Invoke-WebRequest -UseBasicParsing 'http://localhost:9222/json/version'
 
 로그 파일과 `node_modules`는 복구 후 다시 생성할 수 있으므로 필수 백업 대상은 아닙니다.
 
-시스템 관리 화면, 관리자 PIN, GitHub 업데이트, 자동 업데이트 작업 스케줄러의 상세 운영 방법은 `docs\system-management.md`를 참고하십시오. 신규 설치에서는 수동 NSSM 명령 대신 `scripts\install-service.ps1`을 사용할 수 있습니다.
+시스템 관리 화면, GitHub 업데이트, 자동 업데이트 작업 스케줄러의 상세 운영 방법은 `docs\system-management.md`를 참고하십시오. 신규 설치에서는 수동 NSSM 명령 대신 `scripts\install-service.ps1`을 사용할 수 있습니다.

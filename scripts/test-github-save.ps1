@@ -78,7 +78,7 @@ try {
     Assert-Test ((Invoke-NativeChecked 'git.exe' @('rev-parse', 'HEAD') $workRoot) -eq $initialHead) 'DEPLOY 오입력 후 commit이 변경됨'
 
     New-Item -ItemType Directory -Path (Join-Path $workRoot 'logs'),(Join-Path $workRoot 'backups'),(Join-Path $workRoot 'config'),(Join-Path $workRoot 'profile') -Force | Out-Null
-    [IO.File]::WriteAllText((Join-Path $workRoot '.env'), 'KREAM_SYSTEM_ADMIN_PIN=never-upload', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $workRoot '.env'), 'TEST_SECRET=never-upload', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $workRoot 'logs\app.log'), 'secret log', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $workRoot 'backups\test.db'), 'db', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $workRoot 'config\system-config.json'), '{"local":true}', [Text.UTF8Encoding]::new($false))

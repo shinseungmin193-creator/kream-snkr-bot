@@ -50,3 +50,8 @@ auth-state*.json
 *.bak
 tmp/
 temp/
+
+# Worker PC installation artifacts
+KREAM_로그인_Chrome.bat
+data/worker-install.json
+tools/nssm/

@@ -142,51 +142,12 @@ function getInternalIp() {
   return null;
 }
 
-class AdminPinGuard {
-  constructor() {
-    this.failures = new Map();
-    this.windowMs = 15 * 60 * 1000;
-    this.maxFailures = 5;
-  }
-
-  isConfigured() {
-    return Boolean(String(process.env.KREAM_SYSTEM_ADMIN_PIN || '').trim());
-  }
-
-  verify(clientKey, submittedPin) {
-    const expected = String(process.env.KREAM_SYSTEM_ADMIN_PIN || '');
-    if (!expected) return { ok: false, status: 503, message: '관리자 PIN이 설정되지 않았습니다. KREAM_SYSTEM_ADMIN_PIN 환경변수를 설정하세요.' };
-    const key = String(clientKey || 'unknown');
-    const now = Date.now();
-    const record = this.failures.get(key);
-    if (record && record.lockedUntil > now) {
-      return { ok: false, status: 429, message: '관리자 인증 시도가 잠겼습니다. 잠시 후 다시 시도하세요.' };
-    }
-    const submitted = String(submittedPin || '');
-    const expectedBuffer = Buffer.from(expected);
-    const submittedBuffer = Buffer.from(submitted);
-    const ok = expectedBuffer.length === submittedBuffer.length && crypto.timingSafeEqual(expectedBuffer, submittedBuffer);
-    if (ok) {
-      this.failures.delete(key);
-      return { ok: true };
-    }
-    const recent = record && now - record.firstFailure < this.windowMs
-      ? record
-      : { count: 0, firstFailure: now, lockedUntil: 0 };
-    recent.count += 1;
-    if (recent.count >= this.maxFailures) recent.lockedUntil = now + this.windowMs;
-    this.failures.set(key, recent);
-    return { ok: false, status: recent.lockedUntil ? 429 : 401, message: '관리자 PIN이 올바르지 않습니다.' };
-  }
-}
-
 class SystemManager {
   constructor(options) {
     this.inventoryDb = options.inventoryDb;
     this.chromium = options.chromium;
     this.getJobState = options.getJobState || (() => ({ busy: false, name: null }));
     this.startedAt = Date.now();
-    this.adminPin = new AdminPinGuard();
     this.systemBrowser = null;
     config.ensureRuntimeDirectories();
     if (!fs.existsSync(config.SETTINGS_PATH)) writeSettings(DEFAULT_SETTINGS);
@@ -298,7 +259,6 @@ class SystemManager {
       memory: process.memoryUsage(),
       job,
       updateInProgress: this.isUpdateRunning(),
-      adminPinConfigured: this.adminPin.isConfigured(),
       settings: readSettings(),
       checkedAt: new Date().toISOString()
     };
@@ -319,6 +279,11 @@ class SystemManager {
     };
     const processes = await safeCommand('tasklist.exe', ['/FI', 'IMAGENAME eq chrome.exe', '/NH'], { timeout: 10000 });
     result.chromeProcessRunning = /chrome\.exe/i.test(processes.stdout);
+    const activeJob = this.getJobState();
+    if (activeJob?.busy) {
+      result.error = `자동화 작업 실행 중에는 Chrome 상태 확인을 연기합니다: ${activeJob.name || '작업 실행 중'}`;
+      return result;
+    }
     try {
       if (!this.systemBrowser || !this.systemBrowser.isConnected()) {
         this.systemBrowser = await this.chromium.connectOverCDP(config.CDP_URL, { timeout: 8000 });
@@ -503,7 +468,6 @@ class SystemManager {
 
 module.exports = {
   SystemManager,
-  AdminPinGuard,
   DEFAULT_SETTINGS,
   readSettings,
   writeSettings,
