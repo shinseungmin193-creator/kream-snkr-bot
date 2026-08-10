@@ -147,7 +147,13 @@ function requestStop() {
 
 taskQueue.on('registered', job => sendLog(`Queue 등록: ${job.label}`));
 taskQueue.on('started', job => sendLog(`Queue 시작: ${job.label} (${job.id})`));
-taskQueue.on('completed', job => sendLog(`Queue 완료: ${job.label} (${job.durationSeconds}초)`));
+taskQueue.on('completed', job => {
+    sendLog(`Queue 완료: ${job.label} (${job.durationSeconds}초)`);
+    if (['price-compare-all', 'price-compare-selected', 'price-update'].includes(job.type) || String(job.type || '').startsWith('legacy-')) {
+        sendLog('UI 수정 대상 갱신 요청');
+        sendSpecial('__TARGETS_REFRESH__');
+    }
+});
 taskQueue.on('failed', job => sendLog(`Queue 실패: ${job.label} - ${job.error || '알 수 없는 오류'}`));
 taskQueue.on('canceled', job => sendLog(`Queue 취소: ${job.label}`));
 taskQueue.on('cancel-requested', job => sendLog(`Queue 안전 종료 요청: ${job.label}`));
@@ -194,6 +200,50 @@ function getTargetFile(type) {
     return 'update_targets.json';
 }
 
+function getInventoryFile(type) {
+    if (type === 'pokemon') return 'inventory_pokemon.json';
+    if (type === 'onepiece') return 'inventory_onepiece.json';
+    return 'inventory_all.json';
+}
+
+function getComparisonResultFile(type) {
+    if (type === 'pokemon') return 'inventory_result_pokemon.json';
+    if (type === 'onepiece') return 'inventory_result_onepiece.json';
+    return 'inventory_result.json';
+}
+
+function readJsonFile(fileName) {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, fileName), 'utf8'));
+}
+
+function ensureComparisonCoverage(results, expectedStockIds, label) {
+    const expected = [...new Set((expectedStockIds || []).map(value => String(value || '').trim()).filter(Boolean))];
+    const actual = (results || []).map(item => String(item?.stockId || '').trim()).filter(Boolean);
+    const actualSet = new Set(actual);
+    if (actualSet.size !== actual.length) throw new Error(`${label} 결과에 중복 stockId가 있습니다.`);
+    const missing = expected.filter(stockId => !actualSet.has(stockId));
+    const unexpected = actual.filter(stockId => !expected.includes(stockId));
+    if (missing.length || unexpected.length || actual.length !== expected.length) {
+        throw new Error(`${label} 결과 불일치: 요청 ${expected.length}개, 처리 ${actual.length}개, 누락 ${missing.length}개, 초과 ${unexpected.length}개`);
+    }
+}
+
+function canonicalTargetsForType(type) {
+    const items = inventoryDb.targets();
+    if (type === 'pokemon') return items.filter(item => /포켓몬|pokemon/i.test(item.productName || ''));
+    if (type === 'onepiece') return items.filter(item => /원피스|one\s*piece/i.test(item.productName || ''));
+    return items;
+}
+
+function toLegacyTarget(item) {
+    return {
+        ...item,
+        koreanName: item.productName,
+        option: item.optionName,
+        myPrice: item.currentPrice
+    };
+}
+
 function parsePrice(value) {
     const n = Number(String(value || '').replace(/[^\d]/g, ''));
     return Number.isFinite(n) ? n : 0;
@@ -218,6 +268,8 @@ function handleScriptLine(line, logType = null) {
         sendSpecial(`__TARGET_FOUND_B64__:${base64}`);
         return;
     }
+
+    if (text.startsWith('__AUTOMATION_PROGRESS__:')) return;
 
     if (logType) fileLogger.write(logType, text);
     sendLog(text);
@@ -340,27 +392,67 @@ function runScript(scriptName, args = [], onLine = null) {
     });
 }
 
-async function runKreamFlow(keyword) {
+async function runKreamFlow(keyword, context, range = { start: 0, end: 100 }) {
     const type = getTypeByKeyword(keyword);
 
     checkStop();
 
     sendLog(`${keyword} 실행 시작`);
     sendSpecial(`__RUN_START__:${type}`);
+    reportProgressInRange(context, {
+        current: 0, total: null, percent: 0,
+        step: '대상 계산', message: `${keyword} 판매 재고 검색 준비 중`
+    }, range, `legacy-${type}-inventory`);
 
     // Legacy flows keep their explicit keyword; inventory sync uses --sync-all separately.
-    await runScript('inventory.js', ['--keyword', keyword]);
+    await runScript('inventory.js', ['--keyword', keyword], inventoryProgressReporter(
+        context,
+        subProgressRange(range, 0, 0.2)
+    ));
     checkStop();
 
-    await runScript('compareAll.js', [keyword]);
+    const inventoryItems = readJsonFile(getInventoryFile(type));
+    const inventoryCounts = inventoryDb.upsertInventory(inventoryItems, false);
+    sendLog(`${keyword} 판매 재고 DB 동기화: ${inventoryCounts.success}개`);
+    reportProgressInRange(context, {
+        current: 0, total: inventoryItems.length, percent: 20,
+        step: '최저가 조회 준비', message: `${keyword} 가격 비교 대상 ${inventoryItems.length}개 확인`
+    }, range, `legacy-${type}-compare`);
+
+    await runScript('compareAll.js', [keyword], compareProgressReporter(
+        context,
+        inventoryItems.length,
+        subProgressRange(range, 0.2, 0.95)
+    ));
     checkStop();
 
+    reportProgressInRange(context, {
+        current: inventoryItems.length, total: inventoryItems.length, percent: 96,
+        step: '수정 대상 계산', message: `${keyword} 수정 대상 필터링 중`
+    }, range, `legacy-${type}-finalize`);
     await runScript('filterTargets.js', [keyword]);
     checkStop();
+
+    const results = readJsonFile(getComparisonResultFile(type));
+    const calculatedTargets = readJsonFile(getTargetFile(type));
+    ensureComparisonCoverage(results, inventoryItems.map(item => item.stockId), `${keyword} 가격 비교`);
+    const counts = inventoryDb.applyComparison(results);
+    const snapshot = inventoryDb.targetSnapshot();
+    const processedIds = new Set(results.map(item => String(item.stockId)));
+    const storedScopeCount = snapshot.items.filter(item => processedIds.has(String(item.stockId))).length;
+    sendLog(`수정 대상 계산: ${calculatedTargets.length}개`);
+    sendLog(`DB 수정 대상 저장 완료: ${storedScopeCount}개`);
+    sendLog(`${keyword} 비교 결과 DB 반영: ${results.length}개 / 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
+    sendLog(`전체 수정 대상 현재: ${snapshot.count}개`);
+    reportProgressInRange(context, {
+        current: results.length, total: results.length, percent: 100,
+        step: 'DB 저장', message: `${keyword} 수정 대상 ${storedScopeCount}개 DB 반영 완료`
+    }, range, `legacy-${type}-finalize`);
 
     sendLog(`${keyword} 작업 완료`);
     sendSpecial(`__RUN_DONE__:${type}`);
     sendSpecial(`__REFRESH_TARGETS__:${type}`);
+    return { total: results.length, targets: storedScopeCount, ...counts };
 }
 
 async function clickRealRowEditButton(page, row, stockId) {
@@ -736,11 +828,60 @@ async function openKreamStockEdit(stockId, newPrice) {
     }
 }
 
-function inventoryProgressReporter(context) {
+function parseAutomationProgress(line) {
+    const text = String(line || '');
+    if (!text.startsWith('__AUTOMATION_PROGRESS__:')) return null;
+    try { return JSON.parse(text.slice('__AUTOMATION_PROGRESS__:'.length)); }
+    catch { return null; }
+}
+
+function reportProgressInRange(context, progress, range = { start: 0, end: 100 }, etaKey = null) {
+    const start = Math.max(0, Math.min(100, Number(range.start) || 0));
+    const end = Math.max(start, Math.min(100, Number(range.end) || 100));
+    const current = Math.max(0, Number(progress.current) || 0);
+    const total = progress.total === null || progress.total === undefined ? null : Math.max(0, Number(progress.total) || 0);
+    const localPercent = progress.percent !== null && progress.percent !== undefined
+        ? Math.max(0, Math.min(100, Number(progress.percent) || 0))
+        : total > 0 ? Math.max(0, Math.min(100, (current / total) * 100)) : 0;
+    const roundedPercent = Math.round(start + ((end - start) * localPercent / 100));
+    const percent = current > 0 && total > current
+        ? Math.max(1, roundedPercent)
+        : roundedPercent;
+    context.reportProgress({
+        current,
+        total,
+        percent,
+        message: progress.message,
+        step: progress.step,
+        etaKey: progress.etaKey || etaKey || progress.step
+    });
+}
+
+function subProgressRange(range, fromRatio, toRatio) {
+    const start = Number(range.start) || 0;
+    const end = Number(range.end) || 100;
+    const width = end - start;
+    return {
+        start: start + width * fromRatio,
+        end: start + width * toRatio
+    };
+}
+
+function inventoryProgressReporter(context, range = { start: 0, end: 95 }) {
     let current = 0;
-    let total = 0;
+    let total = null;
+    let structuredSeen = false;
     return line => {
         const text = String(line || '');
+        const structured = parseAutomationProgress(text);
+        if (structured) {
+            structuredSeen = true;
+            reportProgressInRange(context, structured, range, 'inventory');
+            current = Math.max(current, Number(structured.current) || 0);
+            if (structured.total !== null && structured.total !== undefined) total = Number(structured.total) || null;
+            return;
+        }
+        if (structuredSeen) return;
         const totalMatch = text.match(/판매중 재고\s*(\d+)개/);
         const cumulativeMatch = text.match(/누적:\s*(\d+)개/);
         const savedMatch = text.match(/총\s*(\d+)개 저장 완료/);
@@ -752,24 +893,34 @@ function inventoryProgressReporter(context) {
             total = total || current;
         }
         if (total > 0 && (totalMatch || cumulativeMatch || savedMatch)) {
-            context.reportProgress({ current, total, message: `판매목록 ${current} / ${total}` });
+            reportProgressInRange(context, { current, total, message: `판매목록 ${current} / ${total}`, step: '판매 재고 수집' }, range, 'inventory');
         } else if (pageMatch) {
-            context.reportProgress({
+            reportProgressInRange(context, {
                 current: Number(pageMatch[1]),
                 total: Number(pageMatch[2]),
-                message: `${pageMatch[1]} / ${pageMatch[2]} 페이지 수집`
-            });
+                message: `${pageMatch[1]} / ${pageMatch[2]} 페이지 수집`,
+                step: '판매 재고 수집'
+            }, range, 'inventory-pages');
         }
     };
 }
 
-function compareProgressReporter(context, totalHint) {
+function compareProgressReporter(context, totalHint, range = { start: 0, end: 98 }) {
+    let structuredSeen = false;
     return line => {
-        const match = String(line || '').match(/(\d+)\/(\d+)\s*가격 비교 완료/);
+        const text = String(line || '');
+        const structured = parseAutomationProgress(text);
+        if (structured) {
+            structuredSeen = true;
+            reportProgressInRange(context, { ...structured, total: structured.total || totalHint || null }, range, 'compare');
+            return;
+        }
+        if (structuredSeen) return;
+        const match = text.match(/(\d+)\/(\d+)\s*가격 비교 완료/);
         if (!match) return;
         const current = Number(match[1]);
-        const total = Number(match[2]) || totalHint || 0;
-        context.reportProgress({ current, total, message: `${current} / ${total} 가격 비교` });
+        const total = Number(match[2]) || totalHint || null;
+        reportProgressInRange(context, { current, total, message: `${current} / ${total} 가격 비교`, step: '가격 비교' }, range, 'compare');
     };
 }
 
@@ -786,15 +937,17 @@ function inventoryRowsForCompare(rows) {
 async function executeInventorySync(context) {
     resetStop();
     sendLog('판매목록 동기화 시작');
+    context.reportProgress({ current: 0, total: null, percent: 0, step: '대상 계산', etaKey: 'inventory', message: '판매중 재고 대상 계산 중' });
     try {
         await runScript('inventory.js', ['--sync-all'], inventoryProgressReporter(context));
         context.throwIfCancellationRequested();
         checkStop();
         const filePath = path.join(__dirname, 'inventory_all.json');
         const items = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        context.reportProgress({ current: items.length, total: items.length, percent: 97, step: 'DB 저장', etaKey: 'inventory-save', message: `${items.length}개 DB 저장 중` });
         const counts = inventoryDb.upsertInventory(items, true);
         inventoryDb.addHistory('INVENTORY_SYNC', 'SUCCESS', { total: items.length, ...counts });
-        context.reportProgress({ current: items.length, total: items.length, message: `총 ${items.length}개 저장 완료` });
+        context.reportProgress({ current: items.length, total: items.length, percent: 100, step: 'DB 저장', etaKey: 'inventory-save', message: `총 ${items.length}개 저장 완료` });
         sendLog(`${counts.success}개 동기화 완료 / 실패 ${counts.failure}개`);
         sendSpecial('__INVENTORY_REFRESH__');
         return { total: items.length, ...counts };
@@ -809,52 +962,63 @@ async function executeFullCompare(context) {
     sendLog('가격 비교 시작');
     const active = inventoryDb.db.prepare("SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' ORDER BY id").all();
     fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(inventoryRowsForCompare(active), null, 2));
-    context.reportProgress({ current: 0, total: active.length, message: `전체 재고 ${active.length}개 가격 비교 시작` });
+    context.reportProgress({ current: 0, total: active.length, percent: 0, step: '최저가 조회 준비', etaKey: 'compare', message: `전체 재고 ${active.length}개 가격 비교 시작` });
     await runScript('compareAll.js', [''], compareProgressReporter(context, active.length));
     context.throwIfCancellationRequested();
     checkStop();
     const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+    ensureComparisonCoverage(results, active.map(item => item.stockId), '전체 가격 비교');
     const counts = inventoryDb.applyComparison(results);
+    const snapshot = inventoryDb.targetSnapshot();
     inventoryDb.addHistory('PRICE_COMPARE', 'SUCCESS', { total: results.length, success: results.length - counts.failures, failure: counts.failures });
-    context.reportProgress({ current: results.length, total: results.length, message: `가격 비교 ${results.length}개 완료` });
-    sendLog(`가격 비교 완료: 수정 대상 ${counts.targets}개 / 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
-    sendSpecial('__TARGETS_REFRESH__');
-    return { total: results.length, ...counts };
+    context.reportProgress({ current: results.length, total: results.length, percent: 100, step: 'DB 저장', etaKey: 'compare-save', message: `가격 비교 ${results.length}개 완료` });
+    sendLog('가격 비교 완료');
+    sendLog(`수정 대상 계산: ${snapshot.count}개`);
+    sendLog(`DB 수정 대상 저장 완료: ${snapshot.count}개`);
+    sendLog(`가격 비교 결과: 하한가 도달 ${counts.floors}개 / 실패 ${counts.failures}개`);
+    return { total: results.length, ...counts, targets: snapshot.count };
 }
 
 async function executeSelectedCompare(stockIds, selected, context) {
     resetStop();
     sendLog(`선택 재고 ${stockIds.length}개 가격 비교 시작`);
     fs.writeFileSync(path.join(__dirname, 'inventory_all.json'), JSON.stringify(inventoryRowsForCompare(selected), null, 2));
-    context.reportProgress({ current: 0, total: stockIds.length, message: `선택 재고 ${stockIds.length}개 가격 비교 시작` });
+    context.reportProgress({ current: 0, total: stockIds.length, percent: 0, step: '최저가 조회 준비', etaKey: 'compare', message: `선택 재고 ${stockIds.length}개 가격 비교 시작` });
     await runScript('compareAll.js', ['--stock-ids', stockIds.join(',')], compareProgressReporter(context, stockIds.length));
     context.throwIfCancellationRequested();
     checkStop();
     const results = JSON.parse(fs.readFileSync(path.join(__dirname, 'inventory_result.json'), 'utf8'));
+    ensureComparisonCoverage(results, stockIds, '선택 가격 비교');
     const processedIds = new Set(results.map(item => String(item.stockId || '')));
-    if (results.length !== stockIds.length || stockIds.some(stockId => !processedIds.has(stockId))) {
-        throw new Error(`선택 비교 결과 불일치: 요청 ${stockIds.length}개, 처리 ${results.length}개`);
-    }
     const counts = inventoryDb.applyComparison(results);
+    const snapshot = inventoryDb.targetSnapshot();
     inventoryDb.addHistory('PRICE_COMPARE_SELECTED', 'SUCCESS', {
         total: results.length,
         success: results.length - counts.failures,
         failure: counts.failures
     });
-    context.reportProgress({ current: results.length, total: results.length, message: `선택 재고 ${results.length}개 가격 비교 완료` });
+    context.reportProgress({ current: results.length, total: results.length, percent: 100, step: 'DB 저장', etaKey: 'compare-save', message: `선택 재고 ${results.length}개 가격 비교 완료` });
     sendLog(`선택 재고 ${stockIds.length}개 가격 비교 완료`);
-    sendSpecial('__TARGETS_REFRESH__');
-    return { total: results.length, stockIds, processedStockIds: [...processedIds], ...counts };
+    sendLog(`선택 대상 갱신: ${results.length}개`);
+    sendLog(`전체 수정 대상 현재: ${snapshot.count}개`);
+    return { total: results.length, stockIds, processedStockIds: [...processedIds], totalTargets: snapshot.count, ...counts };
 }
 
 async function executePriceUpdates(items, context) {
     resetStop();
     let success = 0;
     let failure = 0;
-    context.reportProgress({ current: 0, total: items.length, message: `가격 수정 ${items.length}개 시작` });
+    context.reportProgress({ current: 0, total: items.length, percent: 0, step: '판매가 수정 준비', etaKey: 'price-update', message: `가격 수정 ${items.length}개 시작` });
     for (let index = 0; index < items.length; index++) {
         context.throwIfCancellationRequested();
         const { stockId, newPrice } = items[index];
+        context.reportProgress({
+            current: index,
+            total: items.length,
+            step: '판매가 수정',
+            etaKey: 'price-update',
+            message: `${index + 1}/${items.length} · stockId ${stockId} 판매가 수정 중`
+        });
         try {
             await openKreamStockEdit(stockId, newPrice);
             inventoryDb.markUpdate(stockId, 'COMPLETED', null, newPrice);
@@ -869,24 +1033,38 @@ async function executePriceUpdates(items, context) {
         context.reportProgress({
             current: index + 1,
             total: items.length,
-            message: `${index + 1} / ${items.length} 가격 수정`
+            step: '판매가 수정',
+            etaKey: 'price-update',
+            message: `${index + 1}/${items.length} · stockId ${stockId} 가격 수정 완료`
         });
     }
-    sendSpecial('__TARGETS_REFRESH__');
     sendSpecial('__INVENTORY_REFRESH__');
     return { total: items.length, success, failure };
+}
+
+async function executeAllTargetPriceUpdates(context) {
+    const snapshot = inventoryDb.targetSnapshot();
+    sendLog(`전체 자동수정 실행 대상: ${snapshot.count}개`);
+    context.reportProgress({ current: 0, total: snapshot.count || null, percent: 0, step: '수정 대상 조회', etaKey: 'price-update', message: `DB 최신 수정 대상 ${snapshot.count}개 확인` });
+    if (!snapshot.count) return { total: 0, success: 0, failure: 0 };
+    return executePriceUpdates(snapshot.items.map(item => ({
+        stockId: String(item.stockId),
+        newPrice: Number(item.targetPrice)
+    })), context);
 }
 
 async function executeLegacyFlow(keywords, context) {
     resetStop();
     const list = Array.isArray(keywords) ? keywords : [keywords];
+    let processed = 0;
+    context.reportProgress({ current: 0, total: null, percent: 0, step: '대상 계산', etaKey: 'legacy-prepare', message: `${list.join(', ')} 대상 계산 중` });
     for (let index = 0; index < list.length; index++) {
         context.throwIfCancellationRequested();
-        context.reportProgress({ current: index, total: list.length, message: `${list[index]} 실행 중` });
-        await runKreamFlow(list[index]);
-        context.reportProgress({ current: index + 1, total: list.length, message: `${list[index]} 완료` });
+        const range = { start: (index / list.length) * 100, end: ((index + 1) / list.length) * 100 };
+        const result = await runKreamFlow(list[index], context, range);
+        processed += Number(result?.total) || 0;
     }
-    return { total: list.length };
+    return { total: processed, keywords: list };
 }
 
 app.get('/run/pokemon', (req, res) => {
@@ -917,23 +1095,13 @@ app.get('/api/targets', (req, res) => {
     try {
         const type = req.query.type || 'all';
         const targetFile = getTargetFile(type);
-        const filePath = path.join(__dirname, targetFile);
+        const items = canonicalTargetsForType(type).map(toLegacyTarget);
 
-        if (!fs.existsSync(filePath)) {
-            return res.json({
-                success: true,
-                type,
-                file: targetFile,
-                items: []
-            });
-        }
-
-        const items = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-
+        res.setHeader('Cache-Control', 'no-store');
         res.json({
             success: true,
             type,
-            file: targetFile,
+            file: `DB inventory_items (${targetFile} 호환)`,
             items
         });
 
@@ -992,7 +1160,12 @@ app.get('/api/dashboard/summary', (req, res) => {
 });
 
 app.get('/api/inventory/targets', (req, res) => {
-    try { res.json({ success: true, items: inventoryDb.targets(), comparisonComplete: true }); }
+    try {
+        const snapshot = inventoryDb.targetSnapshot();
+        res.setHeader('Cache-Control', 'no-store');
+        sendLog(`수정 대상 API 응답: ${snapshot.count}개`);
+        res.json({ success: true, items: snapshot.items, count: snapshot.count, comparisonComplete: true });
+    }
     catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
@@ -1062,6 +1235,17 @@ app.post('/api/compare-selected', express.json(), (req, res) => {
 });
 
 app.post('/api/inventory/update-prices', express.json(), (req, res) => {
+    if (req.body?.allTargets === true) {
+        const snapshot = inventoryDb.targetSnapshot();
+        if (!snapshot.count) return res.status(400).json({ success: false, message: '가격 수정 대상이 없습니다.' });
+        return enqueueAutomation(req, res, {
+            type: 'price-update',
+            label: '전체 자동수정',
+            metadata: { count: snapshot.count, source: 'database' },
+            run: executeAllTargetPriceUpdates
+        });
+    }
+
     const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
     const items = rawItems.map(item => ({
         stockId: String(item?.stockId || '').trim(),

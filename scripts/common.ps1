@@ -38,7 +38,6 @@ function Get-KreamNssmPath {
         $env:KREAM_NSSM_PATH,
         $configured,
         (Join-Path $ProjectRoot 'tools\nssm\win64\nssm.exe'),
-        'C:\Users\tmdal\Desktop\개발\nssm\win64\nssm.exe',
         'C:\Tools\nssm\nssm.exe',
         (Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) })

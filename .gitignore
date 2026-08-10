@@ -55,3 +55,7 @@ temp/
 KREAM_로그인_Chrome.bat
 data/worker-install.json
 tools/nssm/
+
+# Windows installer build output
+dist/
+installer/output/

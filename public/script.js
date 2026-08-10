@@ -3,7 +3,8 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const state = {
   page: 1, pageSize: 10, pages: 1, inventory: [], targets: [], busy: false, stopped: false,
   selected: new Set(), dirtyFloors: new Map(),
-  queue: { current:null, waiting:[], recent:[] }, queueLoaded:false, knownRecent:new Set(), stopInFlight:false
+  queue: { current:null, waiting:[], recent:[] }, queueLoaded:false, knownRecent:new Set(), stopInFlight:false,
+  completedFlash:null, completedFlashTimer:null
 };
 const labels = { NEEDS_UPDATE:'수정 필요', FLOOR_REACHED:'하한가 도달', LOWEST:'최저가 유지', NO_FLOOR:'하한가 미설정', SOLD_OUT:'판매 종료', ON_SALE:'판매중', NOT_COMPARED:'비교 전', COMPLETED:'완료', FAILED:'실패', WAITING:'대기' };
 const money = value => Number(value || 0).toLocaleString('ko-KR');
@@ -71,15 +72,24 @@ function updateQueueButtons() {
   updateFloorControls();
 }
 function renderQueue() {
-  const current = state.queue.current;
-  const progress = current?.progress || { current:0, total:0, percent:0, etaSeconds:null };
+  const current = state.queue.current || state.completedFlash;
+  const liveCurrent = state.queue.current;
+  const progress = current?.progress || { current:0, total:null, percent:0, etaSeconds:null, currentStep:null, recentMessages:[] };
+  const totalKnown = Number(progress.total) > 0;
   $('#queueCurrentName').textContent = current?.label || '실행 중인 작업 없음';
   $('#queueProgressBar').style.width = `${progress.percent || 0}%`;
   $('#queuePercent').textContent = `${progress.percent || 0}%`;
-  $('#queueCount').textContent = progress.total ? `${progress.current || 0} / ${progress.total}` : (current ? progress.message || '진행 준비 중' : '0 / 0');
+  $('#queueCount').textContent = current
+    ? (totalKnown ? `${progress.current || 0} / ${progress.total}` : ((progress.current || 0) > 0 ? `${progress.current}개 처리 · 대상 계산 중` : '대상 계산 중'))
+    : '0 / 0';
+  $('#queueCurrentStep').textContent = current?.progress?.currentStep || '-';
   $('#queueProgressMessage').textContent = current?.progress?.message || '-';
-  $('#queueEta').textContent = current ? formatQueueDuration(progress.etaSeconds) : '-';
-  $('#cancelCurrentQueue').hidden = !current;
+  $('#queueEta').textContent = current
+    ? (progress.etaSeconds !== null && progress.etaSeconds !== undefined ? formatQueueDuration(progress.etaSeconds) : (totalKnown && (progress.current || 0) === 0 ? '계산 중' : '-'))
+    : '-';
+  const recentProgress = (progress.recentMessages || []).filter(message => message && message !== progress.message).slice(-4);
+  $('#queueProgressHistory').innerHTML = recentProgress.map(message => `<span>· ${escapeHtml(message)}</span>`).join('');
+  $('#cancelCurrentQueue').hidden = !liveCurrent;
   $('#queueWaitingCount').textContent = state.queue.waiting.length;
   $('#queueWaiting').innerHTML = state.queue.waiting.length ? state.queue.waiting.map((job, index) => `
     <div class="queue-item"><span class="order">${index + 1}</span><div class="job-main"><strong>${escapeHtml(job.label)}</strong><span>등록 ${queueTime(job.registeredAt)}</span></div><button data-queue-cancel="${escapeHtml(job.id)}">취소</button></div>`).join('') : '<p>대기 중인 작업이 없습니다.</p>';
@@ -93,10 +103,22 @@ function renderQueue() {
 }
 function applyQueueState(queue) {
   const terminalIds = new Set((queue.recent || []).map(job => job.id));
-  const hasNewTerminal = state.queueLoaded && [...terminalIds].some(id => !state.knownRecent.has(id));
+  const newTerminal = state.queueLoaded ? (queue.recent || []).find(job => !state.knownRecent.has(job.id)) : null;
+  const hasNewTerminal = Boolean(newTerminal);
   state.queue = { current:queue.current || null, waiting:queue.waiting || [], recent:queue.recent || [] };
   state.knownRecent = terminalIds;
   state.queueLoaded = true;
+  if (newTerminal && !state.queue.current) {
+    state.completedFlash = newTerminal;
+    clearTimeout(state.completedFlashTimer);
+    state.completedFlashTimer = setTimeout(() => {
+      state.completedFlash = null;
+      renderQueue();
+    }, 1000);
+  } else if (state.queue.current) {
+    state.completedFlash = null;
+    clearTimeout(state.completedFlashTimer);
+  }
   renderQueue();
   if (hasNewTerminal) Promise.all([loadSummary(), loadInventory(), loadTargets()]);
 }
@@ -248,8 +270,11 @@ async function saveFloorPrices() {
 async function loadTargets() {
   try {
     const data = await jsonFetch('/api/inventory/targets');
-    if (Array.isArray(data.items) && (data.items.length || data.comparisonComplete)) { state.targets = data.items; renderTargets(); }
-  } catch (error) { log(`수정 대상 조회 실패(기존 목록 유지): ${error.message}`, true); }
+    if (!Array.isArray(data.items)) throw new Error('수정 대상 응답 형식이 올바르지 않습니다.');
+    state.targets = data.items;
+    renderTargets();
+    return state.targets;
+  } catch (error) { log(`수정 대상 조회 실패(기존 목록 유지): ${error.message}`, true); return null; }
 }
 function renderTargets() {
   $('#targetCount').textContent = `(${state.targets.length}개)`;
@@ -266,11 +291,13 @@ async function editOne(row) {
   } catch (error) { row.querySelector('.row-status').innerHTML='<span class="badge FAILED">실패</span>'; log(`수정 등록 실패: ${error.message}`, true); }
 }
 async function autoEdit() {
-  if (!state.targets.length) { status('수정 대상이 없습니다.'); return; }
-  const items = state.targets.map(item => ({ stockId:String(item.stockId), newPrice:Number(item.targetPrice) }));
   try {
-    const result = await queuePost('/api/inventory/update-prices', { items });
-    log(`Queue 등록: 전체 자동수정 ${items.length}개`);
+    const refreshedTargets = await loadTargets();
+    if (!refreshedTargets) { status('최신 수정 대상을 불러오지 못했습니다.'); return; }
+    if (!state.targets.length) { status('수정 대상이 없습니다.'); return; }
+    const count = state.targets.length;
+    const result = await queuePost('/api/inventory/update-prices', { allTargets:true });
+    log(`Queue 등록: 전체 자동수정 ${count}개 (DB 최신 대상)`);
     status(`전체 자동수정 대기열 등록: ${result.job.id.slice(0, 8)}`);
     await loadQueue();
   } catch (error) { log(`전체 자동수정 등록 실패: ${error.message}`, true); status(`전체 자동수정 등록 실패: ${error.message}`); }
@@ -379,6 +406,7 @@ function handleSpecialEvent(text) {
   }
   if (text === '__INVENTORY_REFRESH__') { Promise.all([loadSummary(), loadInventory()]); return true; }
   if (text === '__TARGETS_REFRESH__') { Promise.all([loadSummary(), loadInventory(), loadTargets()]); return true; }
+  if (text.startsWith('__REFRESH_TARGETS__:')) { Promise.all([loadSummary(), loadInventory(), loadTargets()]); return true; }
   return text.startsWith('__');
 }
 function connectLogs() {

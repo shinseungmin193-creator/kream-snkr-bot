@@ -33,7 +33,9 @@ if (!fs.existsSync(inputFile)) {
 
 const items = JSON.parse(fs.readFileSync(inputFile, 'utf8'));
 
-const targets = items.filter(item => {
+const targetsByStockId = new Map();
+
+items.filter(item => {
   const myPrice = Number(item.myPrice || 0);
   const targetPrice = Number(item.targetPrice || 0);
   const needsUpdate = item.needsUpdate === true;
@@ -44,7 +46,12 @@ const targets = items.filter(item => {
     targetPrice > 0 &&
     myPrice !== targetPrice
   );
+}).forEach(item => {
+  const stockId = String(item.stockId || '').trim();
+  if (stockId) targetsByStockId.set(stockId, item);
 });
+
+const targets = [...targetsByStockId.values()];
 
 fs.writeFileSync(
   outputFile,

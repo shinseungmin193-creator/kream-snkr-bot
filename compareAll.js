@@ -1,6 +1,10 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 
+function reportAutomationProgress(progress) {
+  console.log('__AUTOMATION_PROGRESS__:' + JSON.stringify(progress));
+}
+
 function parsePrice(text) {
   return Number(String(text || '').replace(/[^\d]/g, ''));
 }
@@ -133,6 +137,7 @@ function getPricePlan(myPrice, bidRows) {
   if (selectedStockIds) console.log(`선택 재고 ${items.length}개만 가격 비교`);
   console.log('==============================');
 
+  reportAutomationProgress({ current: 0, total: items.length, percent: 0, step: 'Chrome 연결', message: `가격 비교 대상 ${items.length}개 · Chrome 연결 중` });
   const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
   const context = browser.contexts()[0];
   const page = await context.newPage();
@@ -146,6 +151,14 @@ function getPricePlan(myPrice, bidRows) {
     console.log(`[${itemIndex + 1}/${items.length}]`);
     console.log(item.koreanName);
     console.log('옵션:', targetOption);
+    reportAutomationProgress({
+      current: itemIndex,
+      total: items.length,
+      step: 'KREAM 페이지 이동',
+      message: `${itemIndex + 1}/${items.length} · stockId ${item.stockId} 페이지 이동 중`,
+      stockId: String(item.stockId || ''),
+      productName: item.koreanName
+    });
 
     try {
       await page.goto(`https://kream.co.kr/products/${productId}`, {
@@ -174,6 +187,14 @@ function getPricePlan(myPrice, bidRows) {
         await page.waitForTimeout(2000);
       }
 
+      reportAutomationProgress({
+        current: itemIndex,
+        total: items.length,
+        step: '최저가 조회',
+        message: `${itemIndex + 1}/${items.length} · stockId ${item.stockId} 최저가 조회 중`,
+        stockId: String(item.stockId || ''),
+        productName: item.koreanName
+      });
       const text = await page.locator('body').innerText();
 
       const start = text.indexOf('옵션\n판매 희망가\n수량');
@@ -285,6 +306,14 @@ function getPricePlan(myPrice, bidRows) {
       'utf8'
     );
 
+    reportAutomationProgress({
+      current: itemIndex + 1,
+      total: items.length,
+      step: '가격 비교',
+      message: `${itemIndex + 1}/${items.length} · stockId ${item.stockId} 가격 비교 완료`,
+      stockId: String(item.stockId || ''),
+      productName: item.koreanName
+    });
     console.log(`${itemIndex + 1}/${items.length} 가격 비교 완료`);
 
     await page.waitForTimeout(1000);

@@ -88,9 +88,11 @@ function listInventory(query = {}) {
   return { items, total, page, pageSize, pages: Math.max(1, Math.ceil(total/pageSize)) };
 }
 
+const TARGET_WHERE = "saleStatus='ON_SALE' AND compareStatus IN ('NEEDS_UPDATE','NO_FLOOR') AND targetPrice>0 AND targetPrice!=currentPrice";
+
 function summary() {
   return db.prepare(`SELECT COUNT(CASE WHEN saleStatus='ON_SALE' THEN 1 END) totalActive,
-    COUNT(CASE WHEN compareStatus='NEEDS_UPDATE' THEN 1 END) needsUpdate,
+    COUNT(CASE WHEN ${TARGET_WHERE} THEN 1 END) needsUpdate,
     COUNT(CASE WHEN compareStatus='FLOOR_REACHED' THEN 1 END) floorReached,
     COUNT(CASE WHEN compareStatus IN ('LOWEST','NO_FLOOR') THEN 1 END) lowestMaintained,
     COUNT(CASE WHEN saleStatus!='ON_SALE' THEN 1 END) soldOut,
@@ -144,24 +146,29 @@ function saveFloorPrice(stockId, value) {
 }
 
 function applyComparison(results) {
-  const stmt=db.prepare(`UPDATE inventory_items SET lowestPrice=?,targetPrice=?,compareStatus=?,lastComparedAt=?,updatedAt=? WHERE stockId=?`);
+  const stmt=db.prepare(`UPDATE inventory_items SET lowestPrice=?,targetPrice=?,compareStatus=?,
+    updateStatus=CASE WHEN ? THEN 'WAITING' ELSE updateStatus END,
+    updateError=CASE WHEN ? THEN NULL ELSE updateError END,lastComparedAt=?,updatedAt=? WHERE stockId=?`);
   const timestamp=now(); let targets=0, floors=0, failures=0;
   db.exec('BEGIN'); try {
     for (const raw of results || []) {
-      const row=db.prepare('SELECT floorPrice FROM inventory_items WHERE stockId=?').get(String(raw.stockId||'')); if(!row) continue;
+      const row=db.prepare('SELECT floorPrice,currentPrice FROM inventory_items WHERE stockId=?').get(String(raw.stockId||'')); if(!row) continue;
       const target=number(raw.targetPrice), lowest=number(raw.lowestPrice), floor=number(row.floorPrice);
       let status;
       if(raw.error){status='COMPARE_FAILED';failures++;}
       else if(floor && ((!target || target<floor) || (lowest && lowest<floor))){status='FLOOR_REACHED';floors++;}
       else if(raw.needsUpdate && target){status=floor?'NEEDS_UPDATE':'NO_FLOOR';targets++;}
       else status=floor?'LOWEST':'NO_FLOOR';
-      stmt.run(lowest,target,status,timestamp,timestamp,String(raw.stockId));
+      const isTarget=!raw.error && raw.needsUpdate===true && target>0 && target!==number(row.currentPrice) && ['NEEDS_UPDATE','NO_FLOOR'].includes(status);
+      stmt.run(lowest,target,status,isTarget?1:0,isTarget?1:0,timestamp,timestamp,String(raw.stockId));
     } db.exec('COMMIT');
   } catch(e){db.exec('ROLLBACK');throw e;} return {targets,floors,failures};
 }
 
-function targets(){ return db.prepare("SELECT * FROM inventory_items WHERE saleStatus='ON_SALE' AND compareStatus IN ('NEEDS_UPDATE','NO_FLOOR') AND targetPrice>0 AND targetPrice!=currentPrice ORDER BY id").all(); }
+function targets(){ return db.prepare(`SELECT * FROM inventory_items WHERE ${TARGET_WHERE} ORDER BY id`).all(); }
+function targetCount(){ return db.prepare(`SELECT COUNT(*) count FROM inventory_items WHERE ${TARGET_WHERE}`).get().count; }
+function targetSnapshot(){ const items=targets(); return {items,count:items.length}; }
 function markUpdate(stockId,status,error=null,newPrice=null){ db.prepare('UPDATE inventory_items SET updateStatus=?,updateError=?,currentPrice=COALESCE(?,currentPrice),lastUpdatedAt=?,updatedAt=? WHERE stockId=?').run(status,error,newPrice,status==='COMPLETED'?now():null,now(),stockId); }
 function addHistory(kind,status,counts={},message=''){ db.prepare('INSERT INTO sync_history(kind,status,totalCount,successCount,failureCount,message,createdAt) VALUES(?,?,?,?,?,?,?)').run(kind,status,counts.total||0,counts.success||0,counts.failure||0,message,now()); }
 
-module.exports={DB_PATH,db,upsertInventory,listInventory,summary,saveFloorPrice,saveFloorPrices,applyComparison,targets,markUpdate,addHistory,MAX_FLOOR_PRICE};
+module.exports={DB_PATH,db,upsertInventory,listInventory,summary,saveFloorPrice,saveFloorPrices,applyComparison,targets,targetCount,targetSnapshot,markUpdate,addHistory,MAX_FLOOR_PRICE,TARGET_WHERE};

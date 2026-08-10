@@ -58,6 +58,55 @@ async function testDuplicateProtection() {
     await waitUntil(() => queue.getSnapshot().recent.length === 1);
 }
 
+async function testProgressContract() {
+    let now = new Date('2026-08-10T00:00:00.000Z');
+    const queue = new TaskQueue({ clock:() => new Date(now) });
+    let runningSnapshot = null;
+    let firstUnitSnapshot = null;
+    queue.enqueue({
+        type:'progress-test', label:'진행률 테스트', requestIp:'127.0.0.1',
+        run:async context => {
+            context.reportProgress({ current:1, total:536, step:'large compare', etaKey:'compare-large', message:'1/536 complete' });
+            firstUnitSnapshot = queue.getSnapshot().current;
+            context.reportProgress({ current:0, total:10, step:'최저가 조회', etaKey:'compare', message:'대상 10개 확인' });
+            now = new Date(now.getTime() + 10000);
+            context.reportProgress({ current:2, total:10, step:'가격 비교', etaKey:'compare', message:'2/10 가격 비교 완료' });
+            runningSnapshot = queue.getSnapshot().current;
+        }
+    });
+    await waitUntil(() => queue.getSnapshot().recent.length === 1);
+    assert.strictEqual(firstUnitSnapshot.progressPercent, 1);
+    assert.strictEqual(runningSnapshot.title, '진행률 테스트');
+    assert.strictEqual(runningSnapshot.statusCode, 'running');
+    assert.strictEqual(runningSnapshot.current, 2);
+    assert.strictEqual(runningSnapshot.total, 10);
+    assert.strictEqual(runningSnapshot.progressPercent, 20);
+    assert.strictEqual(runningSnapshot.currentStep, '가격 비교');
+    assert.strictEqual(runningSnapshot.estimatedRemainingMs, 40000);
+    assert(runningSnapshot.updatedAt);
+    assert(runningSnapshot.progress.recentMessages.includes('2/10 가격 비교 완료'));
+
+    const completed = queue.getSnapshot().recent[0];
+    assert.strictEqual(completed.current, 10);
+    assert.strictEqual(completed.progressPercent, 100);
+    assert.strictEqual(completed.message, '완료');
+    assert.strictEqual(completed.currentStep, '완료');
+
+    queue.enqueue({
+        type:'failure-test', label:'실패 테스트', requestIp:'127.0.0.1',
+        run:async context => {
+            context.reportProgress({ current:3, total:10, step:'가격 비교', message:'3/10 처리 중' });
+            throw new Error('실제 테스트 오류');
+        }
+    });
+    await waitUntil(() => queue.getSnapshot().recent.length === 2);
+    const failed = queue.getSnapshot().recent[0];
+    assert.strictEqual(failed.status, STATUS.FAILED);
+    assert.strictEqual(failed.current, 3);
+    assert.strictEqual(failed.message, '실제 테스트 오류');
+    assert.strictEqual(failed.currentStep, '실패');
+}
+
 async function testWaitingAndRunningCancellation() {
     const queue = new TaskQueue();
     let cancelHookCalled = false;
@@ -140,11 +189,12 @@ async function testStopAll() {
 
 (async () => {
     await testSequentialExecution();
+    await testProgressContract();
     await testDuplicateProtection();
     await testWaitingAndRunningCancellation();
     await testStopAll();
     await testRecentLimit();
-    console.log('작업 Queue 테스트 통과: 동시 실행 1, 순서 보장, 중복 차단, 전체 중지, Playwright 취소 훅, 최근 50개');
+    console.log('작업 Queue 테스트 통과: 표준 progress/ETA, 완료 100%, 실패 오류 유지, 동시 실행 1, 순서 보장, 중복 차단, 전체 중지, Playwright 취소 훅, 최근 50개');
 })().catch(error => {
     console.error(error.stack || error.message);
     process.exitCode = 1;

@@ -206,9 +206,11 @@ try {
     Add-TestResult '기본 제거 성공' ($basicUninstall.ExitCode -eq 0)
     Add-TestResult '기본 제거 DB/설정/로그인 프로필 보존' ((Test-Path -LiteralPath $dbPath) -and (Test-Path -LiteralPath $settingsPath) -and (Test-Path -LiteralPath $profileState))
     Add-TestResult '기본 제거 Chrome 실행 BAT 제거' (-not (Test-Path -LiteralPath (Join-Path $installRoot 'KREAM_로그인_Chrome.bat')))
+    Add-TestResult '기본 제거 프로그램 파일 제거' (-not (Test-Path -LiteralPath (Join-Path $installRoot 'app.js')) -and -not (Test-Path -LiteralPath (Join-Path $installRoot '.git')))
 
     $repair = Invoke-WorkerScript $installer @('-InstallPath', $installRoot, '-TestMode', '-ChromeInstallChoice', 'No')
     Add-TestResult '기본 제거 후 재설치 복구' ($repair.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $installRoot 'KREAM_로그인_Chrome.bat')))
+    Add-TestResult '보존 데이터 위에 Git 저장소 복구' (Test-Path -LiteralPath (Join-Path $installRoot '.git'))
 
     $guard = Invoke-WorkerScript $uninstaller @('-InstallPath', $installRoot, '-TestMode', '-DeleteAllData', '-Confirmation', 'delete all data')
     Add-TestResult 'DELETE ALL DATA 대소문자/정확 입력 보호' ($guard.ExitCode -ne 0 -and (Test-Path -LiteralPath $installRoot))

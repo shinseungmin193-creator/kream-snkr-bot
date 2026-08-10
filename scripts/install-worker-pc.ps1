@@ -2,6 +2,7 @@
 param(
     [string]$InstallPath = 'C:\KREAMBOT',
     [string]$SourceRoot = '',
+    [ValidateSet('Latest','Repair')][string]$ReinstallMode = 'Latest',
     [ValidateSet('Prompt','Yes','No')][string]$ChromeInstallChoice = 'Prompt',
     [switch]$TestMode,
     [ValidateSet('Git','Node','Npm','Chrome','Nssm')][string[]]$SimulateMissingTool = @(),
@@ -240,6 +241,30 @@ function Test-DirectoryEmpty {
     return -not (Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First 1)
 }
 
+function Test-PreservedDataOnly {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $true }
+    $allowed = @('data', 'logs', 'backups', 'config', 'chrome-profile')
+    $unexpected = Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop |
+        Where-Object { $allowed -notcontains $_.Name } |
+        Select-Object -First 1
+    return -not $unexpected
+}
+
+function Merge-RepositoryDirectory {
+    param([string]$Source, [string]$Destination)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($item in Get-ChildItem -LiteralPath $Source -Force) {
+        $target = Join-Path $Destination $item.Name
+        if ($item.PSIsContainer -and (Test-Path -LiteralPath $target -PathType Container)) {
+            Merge-RepositoryDirectory -Source $item.FullName -Destination $target
+        } else {
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+            Move-Item -LiteralPath $item.FullName -Destination $target -Force
+        }
+    }
+}
+
 function Invoke-GitInRepository {
     param([string[]]$Arguments, [switch]$ReturnOutput)
     Push-Location $script:InstallRoot
@@ -257,13 +282,24 @@ function Initialize-OrUpdateRepository {
 
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
         if (-not (Test-DirectoryEmpty $script:InstallRoot)) {
-            throw "설치 경로가 비어 있지 않고 Git 저장소도 아닙니다. 기존 파일을 보존하기 위해 중단합니다: $script:InstallRoot"
+            if (-not (Test-PreservedDataOnly $script:InstallRoot)) {
+                throw "설치 경로가 비어 있지 않고 Git 저장소도 아닙니다. 기존 파일을 보존하기 위해 중단합니다: $script:InstallRoot"
+            }
+            $stagingPath = Join-Path ([IO.Path]::GetTempPath()) "KREAMBOT-clone-$([Guid]::NewGuid().ToString('N'))"
+            try {
+                Write-InstallMessage '보존된 운영 데이터를 확인했습니다. 프로그램 파일만 다시 설치합니다.'
+                Invoke-ExternalCommand $script:GitPath @('clone', '--branch', 'main', '--single-branch', $script:RepositoryUrl, $stagingPath) 'Git 저장소 복제'
+                Merge-RepositoryDirectory -Source $stagingPath -Destination $script:InstallRoot
+            } finally {
+                Remove-VerifiedTemporaryDirectory $stagingPath
+            }
+        } else {
+            if (Test-Path -LiteralPath $script:InstallRoot) {
+                Remove-Item -LiteralPath $script:InstallRoot -Force
+            }
+            Write-InstallMessage "GitHub main 브랜치를 복제합니다: $script:InstallRoot"
+            Invoke-ExternalCommand $script:GitPath @('clone', '--branch', 'main', '--single-branch', $script:RepositoryUrl, $script:InstallRoot) 'Git 저장소 복제'
         }
-        if (Test-Path -LiteralPath $script:InstallRoot) {
-            Remove-Item -LiteralPath $script:InstallRoot -Force
-        }
-        Write-InstallMessage "GitHub main 브랜치를 복제합니다: $script:InstallRoot"
-        Invoke-ExternalCommand $script:GitPath @('clone', '--branch', 'main', '--single-branch', $script:RepositoryUrl, $script:InstallRoot) 'Git 저장소 복제'
     } else {
         Write-InstallMessage '기존 설치를 확인했습니다. 운영 데이터와 설정을 보존합니다.'
         $localDataChecks = [ordered]@{
@@ -286,14 +322,18 @@ function Initialize-OrUpdateRepository {
         if ($branch.Trim() -cne 'main') {
             throw "현재 브랜치가 main이 아닙니다. 브랜치를 임의로 변경하지 않고 중단합니다: $branch"
         }
-        $status = Invoke-GitInRepository @('status', '--porcelain') -ReturnOutput
-        if ($status) {
-            throw "로컬 변경사항이 있어 fetch/pull을 실행하지 않습니다. 변경사항을 먼저 확인하세요.`n$status"
+        if ($ReinstallMode -eq 'Repair') {
+            Write-InstallMessage '복구 모드: 기존 소스와 운영 데이터를 유지하고 의존성 및 서비스 설정을 복구합니다.' 'OK'
+        } else {
+            $status = Invoke-GitInRepository @('status', '--porcelain') -ReturnOutput
+            if ($status) {
+                throw "로컬 변경사항이 있어 fetch/pull을 실행하지 않습니다. 변경사항을 먼저 확인하세요.`n$status"
+            }
+            Write-InstallMessage 'origin/main 최신 내용을 확인합니다.'
+            Invoke-GitInRepository @('fetch', '--prune', 'origin', 'main') | Out-Null
+            Invoke-GitInRepository @('pull', '--ff-only', 'origin', 'main') | Out-Null
+            Write-InstallMessage 'Git 저장소 업데이트 완료' 'OK'
         }
-        Write-InstallMessage 'origin/main 최신 내용을 확인합니다.'
-        Invoke-GitInRepository @('fetch', '--prune', 'origin', 'main') | Out-Null
-        Invoke-GitInRepository @('pull', '--ff-only', 'origin', 'main') | Out-Null
-        Write-InstallMessage 'Git 저장소 업데이트 완료' 'OK'
     }
 
     $originAfter = Invoke-GitInRepository @('remote', 'get-url', 'origin') -ReturnOutput
@@ -498,7 +538,9 @@ exit /b 0
         try {
             $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
             if ($publicDesktop) {
-                $shortcutPath = Join-Path $publicDesktop 'KREAM 로그인 Chrome.lnk'
+                $legacyShortcutPath = Join-Path $publicDesktop 'KREAM 로그인 Chrome.lnk'
+                if (Test-Path -LiteralPath $legacyShortcutPath -PathType Leaf) { Remove-Item -LiteralPath $legacyShortcutPath -Force }
+                $shortcutPath = Join-Path $publicDesktop 'KREAM 로그인.lnk'
                 $shell = New-Object -ComObject WScript.Shell
                 $shortcut = $shell.CreateShortcut($shortcutPath)
                 $shortcut.TargetPath = $launcherPath
@@ -506,6 +548,15 @@ exit /b 0
                 $shortcut.Description = 'KREAM BOT 로그인용 Chrome (CDP 9222)'
                 $shortcut.Save()
                 Write-InstallMessage "바탕 화면 바로가기 생성 완료: $shortcutPath" 'OK'
+
+                $botShortcutPath = Join-Path $publicDesktop 'KREAM BOT.lnk'
+                $botShortcut = $shell.CreateShortcut($botShortcutPath)
+                $botShortcut.TargetPath = Join-Path $env:SystemRoot 'explorer.exe'
+                $botShortcut.Arguments = 'http://localhost:3000'
+                $botShortcut.WorkingDirectory = $script:InstallRoot
+                $botShortcut.Description = 'KREAM BOT 판매 관리 화면'
+                $botShortcut.Save()
+                Write-InstallMessage "KREAM BOT 바탕 화면 바로가기 생성 완료: $botShortcutPath" 'OK'
             }
         } catch {
             Write-InstallMessage "바탕 화면 바로가기를 만들지 못했습니다. BAT 파일은 정상 생성되었습니다: $($_.Exception.Message)" 'WARN'
@@ -709,7 +760,7 @@ function Complete-InstallMarker {
 
 function Invoke-WorkerInstall {
     if (-not $TestMode -and -not (Test-IsAdministrator)) {
-        throw '관리자 권한이 필요합니다. 직원PC_설치.bat을 더블클릭해 실행하세요.'
+        throw '관리자 권한이 필요합니다. KREAMBOT_Setup.exe를 실행하거나 직원PC_설치.bat을 관리자 권한으로 실행하세요.'
     }
     $script:InstallRoot = Resolve-SafeInstallPath $InstallPath
     $script:LogPath = $null
@@ -745,7 +796,7 @@ function Invoke-WorkerInstall {
     Write-Host '업데이트        : 시스템 관리 화면에서 origin/main 최신 업데이트 적용 가능'
     Write-Host ''
     Write-Host '사용 순서'
-    Write-Host '1. KREAM_로그인_Chrome.bat을 실행합니다.'
+    Write-Host '1. 바탕 화면의 KREAM 로그인을 실행합니다.'
     Write-Host '2. 열린 전용 Chrome에서 KREAM에 직접 로그인합니다.'
     Write-Host "3. $($health.LocalUrl) 에 접속합니다."
     Write-Host '4. 이후 업데이트는 시스템 관리 화면에서 확인하고 적용합니다.'

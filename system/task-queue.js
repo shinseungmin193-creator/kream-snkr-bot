@@ -9,6 +9,14 @@ const STATUS = Object.freeze({
     CANCELED: '취소'
 });
 
+const STATUS_CODE = Object.freeze({
+    [STATUS.WAITING]: 'waiting',
+    [STATUS.RUNNING]: 'running',
+    [STATUS.COMPLETED]: 'completed',
+    [STATUS.FAILED]: 'failed',
+    [STATUS.CANCELED]: 'cancelled'
+});
+
 class DuplicateTaskError extends Error {
     constructor(type) {
         super('이미 실행중입니다.');
@@ -53,16 +61,28 @@ class TaskQueue extends EventEmitter {
         if (this.stopping) throw new QueueStoppingError();
         if (this.hasActiveType(type)) throw new DuplicateTaskError(type);
 
+        const registeredAt = this.clock().toISOString();
         const job = {
             id: this.idFactory(),
             type: String(type),
             label: String(label || type),
             requestIp: String(requestIp || 'unknown').slice(0, 80),
-            registeredAt: this.clock().toISOString(),
+            registeredAt,
             startedAt: null,
             endedAt: null,
+            updatedAt: registeredAt,
             status: STATUS.WAITING,
-            progress: { current: 0, total: 0, percent: 0, etaSeconds: null, message: '대기 중' },
+            progress: {
+                current: 0,
+                total: null,
+                percent: 0,
+                etaSeconds: null,
+                message: '대기 중',
+                currentStep: '등록',
+                updatedAt: registeredAt,
+                recentMessages: ['대기 중']
+            },
+            progressTiming: null,
             durationSeconds: null,
             error: null,
             result: null,
@@ -106,26 +126,59 @@ class TaskQueue extends EventEmitter {
     reportProgress(jobId, progress = {}) {
         if (!this.current || this.current.id !== jobId) return false;
         const job = this.current;
-        const current = Math.max(0, Number(progress.current ?? job.progress.current) || 0);
-        const total = Math.max(0, Number(progress.total ?? job.progress.total) || 0);
-        const calculated = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+        const previous = job.progress;
+        const now = this.clock();
+        const current = Math.max(0, Number(progress.current ?? previous.current) || 0);
+        let total = previous.total;
+        if (Object.prototype.hasOwnProperty.call(progress, 'total')) {
+            total = progress.total === null || progress.total === undefined || progress.total === ''
+                ? null
+                : Math.max(0, Number(progress.total) || 0);
+        }
+        const calculated = total > 0
+            ? Math.min(100, Math.max(current > 0 && current < total ? 1 : 0, Math.round((current / total) * 100)))
+            : previous.percent;
         const percent = Math.max(0, Math.min(100, Number(progress.percent ?? calculated) || 0));
+        const currentStep = String(progress.step ?? progress.currentStep ?? previous.currentStep ?? '').slice(0, 100);
+        const etaKey = String(progress.etaKey ?? currentStep).slice(0, 100);
+        const message = String(progress.message ?? previous.message ?? '').slice(0, 200);
+        const timingChanged = !job.progressTiming ||
+            job.progressTiming.etaKey !== etaKey ||
+            job.progressTiming.total !== total ||
+            current < previous.current;
+        if (timingChanged) {
+            job.progressTiming = {
+                etaKey,
+                total,
+                startedAtMs: now.getTime(),
+                startCurrent: current
+            };
+        }
         let etaSeconds = null;
 
-        if (job.startedAt && total > 0 && current > 0 && current < total) {
-            const elapsed = Math.max(0, (this.clock().getTime() - new Date(job.startedAt).getTime()) / 1000);
-            etaSeconds = Math.max(0, Math.round((elapsed / current) * (total - current)));
+        const completedUnits = current - job.progressTiming.startCurrent;
+        if (total > 0 && completedUnits > 0 && current < total) {
+            const elapsed = Math.max(0, (now.getTime() - job.progressTiming.startedAtMs) / 1000);
+            etaSeconds = Math.max(0, Math.round((elapsed / completedUnits) * (total - current)));
         } else if (current >= total && total > 0) {
             etaSeconds = 0;
         }
+
+        const recentMessages = [...(previous.recentMessages || [])];
+        if (message && recentMessages[recentMessages.length - 1] !== message) recentMessages.push(message);
+        const updatedAt = now.toISOString();
 
         job.progress = {
             current,
             total,
             percent,
             etaSeconds,
-            message: String(progress.message ?? job.progress.message ?? '').slice(0, 200)
+            message,
+            currentStep,
+            updatedAt,
+            recentMessages: recentMessages.slice(-5)
         };
+        job.updatedAt = updatedAt;
         this.emit('progress', this.toPublic(job));
         this.emitChanged();
         return true;
@@ -137,8 +190,12 @@ class TaskQueue extends EventEmitter {
             const [job] = this.pending.splice(waitingIndex, 1);
             job.status = STATUS.CANCELED;
             job.endedAt = this.clock().toISOString();
+            job.updatedAt = job.endedAt;
             job.durationSeconds = 0;
-            job.progress.message = '대기 중 취소됨';
+            job.progress.message = '사용자 취소';
+            job.progress.currentStep = '취소';
+            job.progress.updatedAt = job.updatedAt;
+            job.progress.recentMessages = [...(job.progress.recentMessages || []), '사용자 취소'].slice(-5);
             this.finish(job, 'canceled');
             return this.toPublic(job);
         }
@@ -149,6 +206,10 @@ class TaskQueue extends EventEmitter {
 
         job.cancelRequested = true;
         job.progress.message = '안전 종료 요청 중';
+        job.progress.currentStep = '취소';
+        job.updatedAt = this.clock().toISOString();
+        job.progress.updatedAt = job.updatedAt;
+        job.progress.recentMessages = [...(job.progress.recentMessages || []), '안전 종료 요청 중'].slice(-5);
         this.emit('cancel-requested', this.toPublic(job));
         this.emitChanged();
         if (typeof job.onCancel === 'function') {
@@ -197,7 +258,12 @@ class TaskQueue extends EventEmitter {
             job.status = STATUS.CANCELED;
             job.endedAt = this.clock().toISOString();
             job.durationSeconds = 0;
-            job.progress = { current: 0, total: 0, percent: 0, etaSeconds: null, message: '전체 작업 중지로 취소됨' };
+            job.updatedAt = job.endedAt;
+            job.progress = {
+                current: 0, total: null, percent: 0, etaSeconds: null,
+                message: '사용자 취소', currentStep: '취소', updatedAt: job.updatedAt,
+                recentMessages: [...(job.progress.recentMessages || []), '사용자 취소'].slice(-5)
+            };
             this.finish(job, 'canceled');
         }
 
@@ -231,7 +297,11 @@ class TaskQueue extends EventEmitter {
         this.current = job;
         job.status = STATUS.RUNNING;
         job.startedAt = this.clock().toISOString();
+        job.updatedAt = job.startedAt;
         job.progress.message = '실행 시작';
+        job.progress.currentStep = '시작 준비';
+        job.progress.updatedAt = job.startedAt;
+        job.progress.recentMessages = [...(job.progress.recentMessages || []), '실행 시작'].slice(-5);
         this.emit('started', this.toPublic(job));
         this.emitChanged();
 
@@ -252,24 +322,36 @@ class TaskQueue extends EventEmitter {
             job.result = await job.run(context);
             if (job.cancelRequested) {
                 job.status = STATUS.CANCELED;
-                job.progress.message = '취소됨';
+                job.progress.message = '사용자 취소';
+                job.progress.currentStep = '취소';
             } else {
                 job.status = STATUS.COMPLETED;
+                if (job.progress.total !== null && job.progress.total > 0) job.progress.current = job.progress.total;
                 job.progress.percent = 100;
                 job.progress.etaSeconds = 0;
                 job.progress.message = '완료';
+                job.progress.currentStep = '완료';
             }
         } catch (error) {
             if (job.cancelRequested || error?.code === 'TASK_CANCELED') {
                 job.status = STATUS.CANCELED;
-                job.progress.message = '취소됨';
+                job.progress.message = '사용자 취소';
+                job.progress.currentStep = '취소';
             } else {
                 job.status = STATUS.FAILED;
                 job.error = String(error?.message || error).slice(0, 500);
-                job.progress.message = '실패';
+                job.progress.message = job.error;
+                job.progress.currentStep = '실패';
             }
         } finally {
             job.endedAt = this.clock().toISOString();
+            job.updatedAt = job.endedAt;
+            job.progress.updatedAt = job.endedAt;
+            if (job.progress.message) {
+                job.progress.recentMessages = [...(job.progress.recentMessages || []), job.progress.message]
+                    .filter((message, index, values) => index === 0 || message !== values[index - 1])
+                    .slice(-5);
+            }
             job.durationSeconds = Math.max(0, Math.round((new Date(job.endedAt) - new Date(job.startedAt)) / 1000));
             const eventName = job.status === STATUS.COMPLETED ? 'completed' : job.status === STATUS.CANCELED ? 'canceled' : 'failed';
             this.current = null;
@@ -295,11 +377,20 @@ class TaskQueue extends EventEmitter {
             id: job.id,
             type: job.type,
             label: job.label,
+            title: job.label,
             registeredAt: job.registeredAt,
             startedAt: job.startedAt,
             endedAt: job.endedAt,
+            updatedAt: job.updatedAt,
             status: job.status,
+            statusCode: STATUS_CODE[job.status] || 'unknown',
             progress: { ...job.progress },
+            progressPercent: job.progress.percent,
+            current: job.progress.current,
+            total: job.progress.total,
+            message: job.progress.message,
+            currentStep: job.progress.currentStep,
+            estimatedRemainingMs: job.progress.etaSeconds === null ? null : job.progress.etaSeconds * 1000,
             durationSeconds: job.durationSeconds,
             error: job.error,
             metadata: { ...job.metadata }

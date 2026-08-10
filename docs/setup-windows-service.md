@@ -6,8 +6,8 @@
 
 - 서비스 이름: `KREAMBOT`
 - Node.js 실행 파일: `C:\Program Files\nodejs\node.exe`
-- 애플리케이션 파일: `C:\Users\tmdal\Desktop\kream-snkr-bot\app.js`
-- 작업 디렉터리: `C:\Users\tmdal\Desktop\kream-snkr-bot`
+- 애플리케이션 파일: `C:\KREAMBOT\app.js`
+- 작업 디렉터리: `C:\KREAMBOT`
 - 웹 주소: `http://localhost:3000`
 - Chrome CDP 주소: `http://localhost:9222`
 
@@ -35,16 +35,16 @@
 프로젝트 의존성을 설치하고 서비스 로그 디렉터리를 만듭니다.
 
 ```powershell
-Set-Location 'C:\Users\tmdal\Desktop\kream-snkr-bot'
+Set-Location 'C:\KREAMBOT'
 npm.cmd ci
-New-Item -ItemType Directory -Force 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs'
+New-Item -ItemType Directory -Force 'C:\KREAMBOT\logs'
 ```
 
 Node.js와 서버 파일 경로를 확인합니다.
 
 ```powershell
 Test-Path 'C:\Program Files\nodejs\node.exe'
-Test-Path 'C:\Users\tmdal\Desktop\kream-snkr-bot\app.js'
+Test-Path 'C:\KREAMBOT\app.js'
 & 'C:\Program Files\nodejs\node.exe' --version
 ```
 
@@ -55,8 +55,8 @@ Test-Path 'C:\Users\tmdal\Desktop\kream-snkr-bot\app.js'
 다음 명령으로 `KREAMBOT` 서비스를 등록합니다.
 
 ```powershell
-& 'C:\Tools\nssm\nssm.exe' install KREAMBOT 'C:\Program Files\nodejs\node.exe' 'C:\Users\tmdal\Desktop\kream-snkr-bot\app.js'
-& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppDirectory 'C:\Users\tmdal\Desktop\kream-snkr-bot'
+& 'C:\Tools\nssm\nssm.exe' install KREAMBOT 'C:\Program Files\nodejs\node.exe' 'C:\KREAMBOT\app.js'
+& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppDirectory 'C:\KREAMBOT'
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT DisplayName 'KREAM BOT'
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT Description 'KREAM BOT inventory and price management server'
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT Start SERVICE_AUTO_START
@@ -66,8 +66,8 @@ Test-Path 'C:\Users\tmdal\Desktop\kream-snkr-bot\app.js'
 ### 로그 파일 설정
 
 ```powershell
-& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppStdout 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs\service-out.log'
-& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppStderr 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs\service-error.log'
+& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppStdout 'C:\KREAMBOT\logs\service-out.log'
+& 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppStderr 'C:\KREAMBOT\logs\service-error.log'
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppRotateFiles 1
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppRotateOnline 1
 & 'C:\Tools\nssm\nssm.exe' set KREAMBOT AppRotateBytes 10485760
@@ -88,8 +88,8 @@ Get-Service KREAMBOT
 
 ```text
 Application:   C:\Program Files\nodejs\node.exe
-AppParameters: C:\Users\tmdal\Desktop\kream-snkr-bot\app.js
-AppDirectory:  C:\Users\tmdal\Desktop\kream-snkr-bot
+AppParameters: C:\KREAMBOT\app.js
+AppDirectory:  C:\KREAMBOT
 ```
 
 ## 4. 서비스 시작과 중지
@@ -136,19 +136,19 @@ Restart-Service KREAMBOT
 표준 출력 로그:
 
 ```powershell
-Get-Content 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs\service-out.log' -Tail 100
+Get-Content 'C:\KREAMBOT\logs\service-out.log' -Tail 100
 ```
 
 오류 로그:
 
 ```powershell
-Get-Content 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs\service-error.log' -Tail 100
+Get-Content 'C:\KREAMBOT\logs\service-error.log' -Tail 100
 ```
 
 실시간으로 확인하려면 `-Wait`를 추가합니다.
 
 ```powershell
-Get-Content 'C:\Users\tmdal\Desktop\kream-snkr-bot\logs\service-out.log' -Tail 50 -Wait
+Get-Content 'C:\KREAMBOT\logs\service-out.log' -Tail 50 -Wait
 ```
 
 Windows 서비스 이벤트는 이벤트 뷰어의 다음 위치에서도 확인할 수 있습니다.
@@ -198,15 +198,15 @@ Invoke-WebRequest -UseBasicParsing 'http://localhost:9222/json/version'
 1. 프로젝트와 DB를 백업에서 원래 위치로 복원합니다.
 
    ```text
-   C:\Users\tmdal\Desktop\kream-snkr-bot
-   C:\Users\tmdal\Desktop\kream-snkr-bot\data\kream-bot.db
+   C:\KREAMBOT
+   C:\KREAMBOT\data\kream-bot.db
    ```
 
 2. Node.js를 설치하고 `C:\Program Files\nodejs\node.exe`가 존재하는지 확인합니다.
 3. 프로젝트에서 의존성을 다시 설치합니다.
 
    ```powershell
-   Set-Location 'C:\Users\tmdal\Desktop\kream-snkr-bot'
+   Set-Location 'C:\KREAMBOT'
    npm.cmd ci
    ```
 

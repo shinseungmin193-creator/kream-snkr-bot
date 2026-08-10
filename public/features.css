@@ -27,6 +27,8 @@
 .queue-current dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font-size:12px}
 .queue-current dt{color:#8a929b}
 .queue-current dd{margin:0;text-align:right}
+.queue-progress-history{margin-top:9px;padding-top:7px;border-top:1px solid #edf0f2;color:#77808a;font-size:11px;line-height:1.45}
+.queue-progress-history span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .queue-cancel{margin-top:10px;border:1px solid #e34b50;background:#fff;color:#d8373c;border-radius:5px;padding:6px 10px}
 .queue-list{max-height:145px;overflow:auto}
 .queue-list p{color:#9299a1;font-size:12px}

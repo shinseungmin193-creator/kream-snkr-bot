@@ -1,6 +1,10 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 
+function reportAutomationProgress(progress) {
+  console.log('__AUTOMATION_PROGRESS__:' + JSON.stringify(progress));
+}
+
 function parseRow(text) {
   const lines = text.split('\n').map(v => v.trim()).filter(Boolean);
 
@@ -245,10 +249,12 @@ async function moveToPage(page, pageNo) {
       ? 'inventory_all.json'
       : `inventory_${suffix}.json`;
 
+  reportAutomationProgress({ current: 0, total: null, percent: 1, step: 'Chrome 연결', message: 'KREAM 로그인 Chrome 연결 중' });
   const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
   const context = browser.contexts()[0];
   const page = await context.newPage();
 
+  reportAutomationProgress({ current: 0, total: null, percent: 3, step: 'KREAM 페이지 이동', message: '재고별 입찰관리 페이지 이동 중' });
   await page.goto('https://partner.kream.co.kr/business/ask-sales', {
     waitUntil: 'networkidle'
   });
@@ -260,9 +266,12 @@ async function moveToPage(page, pageNo) {
   await page.waitForTimeout(2000);
 
   let syncSearchValueBefore = null;
+  reportAutomationProgress({ current: 0, total: null, percent: 5, step: '검색 조건 설정', message: args.includes('--sync-all') ? '판매 상태를 판매중으로 변경 중' : `${keyword} 검색 조건 적용 중` });
   if (args.includes('--sync-all')) {
     syncSearchValueBefore = await page.getByPlaceholder('검색어를 입력해주세요.').inputValue();
   }
+
+  reportAutomationProgress({ current: 0, total: null, percent: 7, step: '검색 실행', message: '검색 버튼 클릭 및 결과 로딩 중' });
 
   if (args.includes('--sync-all')) {
     // Inventory sync changes only the sale-status field. Every other search
@@ -278,6 +287,7 @@ async function moveToPage(page, pageNo) {
     .click({ force: true });
 
   console.log('검색 완료');
+  reportAutomationProgress({ current: 0, total: null, percent: 9, step: '검색 결과 확인', message: '검색 결과 로딩 완료' });
 
   await page.waitForTimeout(3000);
 
@@ -291,13 +301,22 @@ async function moveToPage(page, pageNo) {
 
   let effectivePageSize = 10;
   let totalPages = 0;
+  let expectedTotalCount = 0;
 
   if (args.includes('--sync-all')) {
+    reportAutomationProgress({ current: 0, total: null, percent: 10, step: '페이지 크기 변경', message: '페이지당 100개씩 보기 적용 중' });
     effectivePageSize = await optimizeSyncPageSize(page);
-    const totalCount = await getTotalInventoryCount(page);
-    totalPages = totalCount > 0 ? Math.ceil(totalCount / effectivePageSize) : 0;
-    if (totalPages > 0) console.log(`총 ${totalPages}페이지 수집 시작 (판매중 재고 ${totalCount}개)`);
+    expectedTotalCount = await getTotalInventoryCount(page);
+    totalPages = expectedTotalCount > 0 ? Math.ceil(expectedTotalCount / effectivePageSize) : 0;
+    if (totalPages > 0) console.log(`총 ${totalPages}페이지 수집 시작 (판매중 재고 ${expectedTotalCount}개)`);
     else console.log(`전체 페이지 수 확인 실패: ${effectivePageSize}개씩 보기 기준으로 끝까지 수집`);
+    reportAutomationProgress({
+      current: 0,
+      total: expectedTotalCount || null,
+      percent: 12,
+      step: '판매 재고 수집',
+      message: totalPages ? `총 ${totalPages}페이지 · 판매중 재고 ${expectedTotalCount}개 확인` : '전체 대상 계산 중'
+    });
   }
 
   if (verifyFiltersOnly) {
@@ -311,6 +330,13 @@ async function moveToPage(page, pageNo) {
 
   // Safety cap prevents an accidental infinite loop while allowing 552+ records.
   for (let pageNo = 1; pageNo <= (totalPages || 1000); pageNo++) {
+    reportAutomationProgress({
+      current: allItems.length,
+      total: expectedTotalCount || null,
+      percent: expectedTotalCount > 0 ? 12 + (allItems.length / expectedTotalCount) * 88 : Math.min(85, 10 + (pageNo - 1) * 5),
+      step: '판매 재고 수집',
+      message: totalPages ? `${pageNo}/${totalPages} 페이지 수집 중` : `${pageNo}페이지 수집 중`
+    });
     await moveToPage(page, pageNo);
     console.log(`===== ${totalPages ? `${pageNo}/${totalPages}` : pageNo} 페이지 =====`);
 
@@ -323,6 +349,13 @@ async function moveToPage(page, pageNo) {
     console.log(`누적: ${allItems.length}`);
 
     console.log(`${totalPages ? `${pageNo}/${totalPages}` : pageNo} 페이지 수집 완료`);
+    reportAutomationProgress({
+      current: allItems.length,
+      total: expectedTotalCount || null,
+      percent: expectedTotalCount > 0 ? Math.min(100, 12 + (allItems.length / expectedTotalCount) * 88) : Math.min(90, 10 + pageNo * 5),
+      step: '판매 재고 수집',
+      message: `${totalPages ? `${pageNo}/${totalPages} 페이지` : `${pageNo}페이지`} 수집 완료 · 누적 ${allItems.length}개`
+    });
     if (totalPages && pageNo >= totalPages) break;
     if (!totalPages && items.length < effectivePageSize) break;
   }
@@ -341,6 +374,7 @@ async function moveToPage(page, pageNo) {
   );
 
   console.log(`총 ${allItems.length}개 저장 완료`);
+  reportAutomationProgress({ current: allItems.length, total: allItems.length, percent: 100, step: '파일 저장', message: `총 ${allItems.length}개 저장 완료` });
   console.log(`${inventoryFile} 생성 완료`);
   console.log('inventory_all.json 호환 저장 완료');
 

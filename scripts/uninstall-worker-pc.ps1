@@ -150,15 +150,32 @@ function Remove-ChromeShortcutAndLauncher {
     if (-not $TestMode) {
         try {
             $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-            $shortcutPath = if ($publicDesktop) { Join-Path $publicDesktop 'KREAM 로그인 Chrome.lnk' } else { $null }
-            if ($shortcutPath -and (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
+            if ($publicDesktop) {
                 $shell = New-Object -ComObject WScript.Shell
-                $shortcut = $shell.CreateShortcut($shortcutPath)
-                if ([IO.Path]::GetFullPath($shortcut.TargetPath) -ieq [IO.Path]::GetFullPath($launcherPath)) {
-                    Remove-Item -LiteralPath $shortcutPath -Force
-                    Write-UninstallMessage 'KREAM 로그인 Chrome 바탕 화면 바로가기 제거 완료' 'OK'
-                } else {
-                    Write-UninstallMessage '동일 이름의 바로가기가 다른 파일을 가리켜 보존했습니다.' 'WARN'
+                foreach ($shortcutName in @('KREAM 로그인.lnk', 'KREAM 로그인 Chrome.lnk')) {
+                    $shortcutPath = Join-Path $publicDesktop $shortcutName
+                    if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
+                        $shortcut = $shell.CreateShortcut($shortcutPath)
+                        if ([IO.Path]::GetFullPath($shortcut.TargetPath) -ieq [IO.Path]::GetFullPath($launcherPath)) {
+                            Remove-Item -LiteralPath $shortcutPath -Force
+                            Write-UninstallMessage "바탕 화면 바로가기 제거 완료: $shortcutName" 'OK'
+                        } else {
+                            Write-UninstallMessage "동일 이름의 바로가기가 다른 파일을 가리켜 보존했습니다: $shortcutName" 'WARN'
+                        }
+                    }
+                }
+
+                $botShortcutPath = Join-Path $publicDesktop 'KREAM BOT.lnk'
+                if (Test-Path -LiteralPath $botShortcutPath -PathType Leaf) {
+                    $botShortcut = $shell.CreateShortcut($botShortcutPath)
+                    $expectedExplorer = Join-Path $env:SystemRoot 'explorer.exe'
+                    if ([IO.Path]::GetFullPath($botShortcut.TargetPath) -ieq [IO.Path]::GetFullPath($expectedExplorer) -and
+                        $botShortcut.Arguments -match 'http://localhost:3000') {
+                        Remove-Item -LiteralPath $botShortcutPath -Force
+                        Write-UninstallMessage 'KREAM BOT 바탕 화면 바로가기 제거 완료' 'OK'
+                    } else {
+                        Write-UninstallMessage 'KREAM BOT 바로가기가 다른 대상을 가리켜 보존했습니다.' 'WARN'
+                    }
                 }
             }
         } catch {
@@ -169,6 +186,21 @@ function Remove-ChromeShortcutAndLauncher {
         Remove-Item -LiteralPath $launcherPath -Force
         Write-UninstallMessage 'KREAM 로그인 Chrome 실행 BAT 제거 완료' 'OK'
     }
+}
+
+function Remove-ApplicationFilesPreservingData {
+    $marker = Read-InstallMarker
+    if (-not $marker) {
+        throw '직원 PC 설치 표식과 경로를 검증할 수 없어 프로그램 파일 제거를 차단했습니다.'
+    }
+    if (-not (Test-Path -LiteralPath $script:InstallRoot -PathType Container)) { return }
+
+    $preservedNames = @('data', 'logs', 'backups', 'config', 'chrome-profile')
+    foreach ($item in Get-ChildItem -LiteralPath $script:InstallRoot -Force) {
+        if ($preservedNames -contains $item.Name) { continue }
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }
+    Write-UninstallMessage '프로그램 파일을 제거하고 운영 데이터 폴더는 보존했습니다.' 'OK'
 }
 
 function Remove-AllInstallationData {
@@ -211,12 +243,13 @@ function Invoke-WorkerUninstall {
     if ($DeleteAllData) {
         Remove-AllInstallationData
     } else {
+        Remove-ApplicationFilesPreservingData
         Write-Host ''
         Write-Host '기본 제거 완료: 다음 운영 데이터는 그대로 보존했습니다.' -ForegroundColor Green
         foreach ($relative in @('data', 'logs', 'backups', 'config\system-config.json', 'chrome-profile')) {
             Write-Host "- $(Join-Path $script:InstallRoot $relative)"
         }
-        Write-Host '재설치하려면 직원PC_설치.bat을 다시 실행하세요.'
+        Write-Host '재설치하려면 KREAMBOT_Setup.exe를 다시 실행하세요.'
     }
 }
 
