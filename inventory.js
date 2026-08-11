@@ -63,11 +63,14 @@ async function selectFilterNearLabel(page, labelText, optionText) {
   const container = label.locator('xpath=ancestor::div[.//button][1]');
   const trigger = container.locator('button').first();
   await trigger.click({ force: true });
-  await page.waitForTimeout(300);
 
   const option = page.getByRole('button', { name: optionText, exact: true }).last();
+  await option.waitFor({ state: 'visible', timeout: 5000 });
   await option.click({ force: true });
-  await page.waitForTimeout(300);
+  await page.waitForFunction(({ label, option }) => {
+    const labels = [...document.querySelectorAll('*')].filter(node => (node.textContent || '').trim() === label);
+    return labels.some(node => node.parentElement?.innerText?.includes(option));
+  }, { label: labelText, option: optionText }, { timeout: 5000 }).catch(() => {});
 }
 
 async function clearInputNearLabel(page, labelText) {
@@ -94,9 +97,9 @@ async function configureLegacySearchConditions(page, keyword) {
   await selectFilterNearLabel(page, '브랜드', '전체');
 
   await page.getByText('재고 번호', { exact: true }).first().click({ force: true });
-  await page.waitForTimeout(300);
-  await page.locator('button').filter({ hasText: '상품명' }).last().click({ force: true });
-  await page.waitForTimeout(300);
+  const productNameOption = page.locator('button').filter({ hasText: '상품명' }).last();
+  await productNameOption.waitFor({ state: 'visible', timeout: 5000 });
+  await productNameOption.click({ force: true });
 
   const searchInput = page.getByPlaceholder('검색어를 입력해주세요.');
   await searchInput.clear();
@@ -140,7 +143,7 @@ async function configureSyncSaleStatusOnly(page) {
 
 async function waitForInventoryRows(page) {
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-  await page.waitForTimeout(700);
+  await page.locator('div.Table_row__ZyONC').first().waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
 }
 
 function getPaginationPageSizeTrigger(page) {
@@ -263,7 +266,7 @@ async function moveToPage(page, pageNo) {
   console.log(`검색어: ${keyword}`);
   console.log(`저장 파일: ${inventoryFile}`);
 
-  await page.waitForTimeout(2000);
+  await page.getByPlaceholder('검색어를 입력해주세요.').waitFor({ state: 'visible', timeout: 15000 });
 
   let syncSearchValueBefore = null;
   reportAutomationProgress({ current: 0, total: null, percent: 5, step: '검색 조건 설정', message: args.includes('--sync-all') ? '판매 상태를 판매중으로 변경 중' : `${keyword} 검색 조건 적용 중` });
@@ -289,7 +292,7 @@ async function moveToPage(page, pageNo) {
   console.log('검색 완료');
   reportAutomationProgress({ current: 0, total: null, percent: 9, step: '검색 결과 확인', message: '검색 결과 로딩 완료' });
 
-  await page.waitForTimeout(3000);
+  await waitForInventoryRows(page);
 
   if (args.includes('--sync-all')) {
     const syncSearchValueAfter = await page.getByPlaceholder('검색어를 입력해주세요.').inputValue();

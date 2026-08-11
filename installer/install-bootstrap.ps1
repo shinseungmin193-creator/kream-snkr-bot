@@ -41,6 +41,19 @@ function Publish-InstallerLog {
     }
 }
 
+function Write-DetailedException {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $details = @(
+        "Exception.Message: $($ErrorRecord.Exception.Message)",
+        "Exception.GetType().FullName: $($ErrorRecord.Exception.GetType().FullName)",
+        "InvocationInfo.ScriptName: $($ErrorRecord.InvocationInfo.ScriptName)",
+        "InvocationInfo.ScriptLineNumber: $($ErrorRecord.InvocationInfo.ScriptLineNumber)",
+        "InvocationInfo.PositionMessage: $($ErrorRecord.InvocationInfo.PositionMessage)",
+        "ScriptStackTrace: $($ErrorRecord.ScriptStackTrace)"
+    )
+    foreach ($detail in $details) { Write-InstallerLine $detail 'ERROR' }
+}
+
 function Refresh-InstallerPath {
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -194,12 +207,16 @@ function Ensure-Chrome {
 }
 
 function Invoke-WorkerInstaller {
-    if (-not (Test-Path -LiteralPath $WorkerScript -PathType Leaf)) { throw "직원 PC 설치 엔진을 찾을 수 없습니다: $WorkerScript" }
+    $resolvedWorkerScript = [IO.Path]::GetFullPath($WorkerScript.Trim().Trim('"'))
+    $resolvedInstallPath = $InstallPath.Trim().Trim('"')
+    if (-not (Test-Path -LiteralPath $resolvedWorkerScript -PathType Leaf)) { throw "직원 PC 설치 엔진을 찾을 수 없습니다: $resolvedWorkerScript" }
     Set-InstallerStage 'KREAM BOT 다운로드 및 구성'
+    Write-InstallerLine "WorkerScript: $resolvedWorkerScript"
+    Write-InstallerLine "InstallPath: $resolvedInstallPath"
+    Write-InstallerLine "ReinstallMode: $ReinstallMode"
     $arguments = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $WorkerScript,
-        '-InstallPath', $InstallPath,
-        '-SourceRoot', (Split-Path -Parent $WorkerScript),
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $resolvedWorkerScript,
+        '-InstallPath', $resolvedInstallPath,
         '-ReinstallMode', $ReinstallMode,
         '-ChromeInstallChoice', 'No'
     )
@@ -229,7 +246,7 @@ try {
     Write-InstallerLine 'KREAM BOT 설치가 완료되었습니다.' 'OK'
     exit 0
 } catch {
-    Write-InstallerLine $_.Exception.Message 'ERROR'
+    Write-DetailedException $_
     Write-InstallerLine "실패 단계: $($script:CurrentStage)" 'ERROR'
     Write-Host "설치 실패. 로그: $($script:FinalLog)"
     exit 1

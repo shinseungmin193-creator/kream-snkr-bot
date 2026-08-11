@@ -2,7 +2,7 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const state = {
   page: 1, pageSize: 10, pages: 1, inventory: [], targets: [], busy: false, stopped: false,
-  selected: new Set(), dirtyFloors: new Map(),
+  selected: new Set(), filteredInventoryIds: [], inventoryLoadToken: 0, dirtyFloors: new Map(),
   queue: { current:null, waiting:[], recent:[] }, queueLoaded:false, knownRecent:new Set(), stopInFlight:false,
   completedFlash:null, completedFlashTimer:null
 };
@@ -159,9 +159,12 @@ function inventoryQuery() {
   return query;
 }
 async function loadInventory() {
+  const loadToken = ++state.inventoryLoadToken;
   try {
     const data = await jsonFetch(`/api/inventory?${inventoryQuery()}`);
+    if (loadToken !== state.inventoryLoadToken) return;
     state.inventory = data.items;
+    state.filteredInventoryIds = data.stockIds.map(String);
     state.pages = data.pages;
     $('#inventoryCount').textContent = `(${data.total}개)`;
     $('#pageInfo').textContent = `${data.page} / ${data.pages}`;
@@ -189,11 +192,12 @@ function updateFloorControls() {
 }
 function updateSelectionUI() {
   $('#selectedCount').textContent = `선택 ${state.selected.size}개`;
-  const visibleIds = state.inventory.map(item => String(item.stockId));
-  const selectedVisible = visibleIds.filter(stockId => state.selected.has(stockId)).length;
+  const filteredIds = state.filteredInventoryIds;
+  const selectedFiltered = filteredIds.filter(stockId => state.selected.has(stockId)).length;
   const header = $('#selectVisible');
-  header.checked = visibleIds.length > 0 && selectedVisible === visibleIds.length;
-  header.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.length;
+  header.checked = filteredIds.length > 0 && selectedFiltered === filteredIds.length;
+  header.indeterminate = selectedFiltered > 0 && selectedFiltered < filteredIds.length;
+  $('#selectFilteredBtn').disabled = filteredIds.length === 0;
 }
 function updateFloorRow(input) {
   const stockId = input.dataset.stock;
@@ -353,8 +357,9 @@ $$('[data-legacy]').forEach(button => button.onclick = () => runLegacy(button));
 $('#compareSelectedBtn').onclick = compareSelected;
 $('#cancelCurrentQueue').onclick = stop;
 $('#saveFloorPricesBtn').onclick = saveFloorPrices;
+$('#selectFilteredBtn').onclick = () => { state.filteredInventoryIds.forEach(stockId => state.selected.add(stockId)); renderInventory(); };
 $('#clearSelectionBtn').onclick = () => { state.selected.clear(); $$('.inventory-select').forEach(input => input.checked=false); updateSelectionUI(); };
-$('#selectVisible').onchange = event => { state.inventory.forEach(item => event.target.checked ? state.selected.add(String(item.stockId)) : state.selected.delete(String(item.stockId))); renderInventory(); };
+$('#selectVisible').onchange = event => { state.filteredInventoryIds.forEach(stockId => event.target.checked ? state.selected.add(stockId) : state.selected.delete(stockId)); renderInventory(); };
 $('#refreshBtn').onclick = () => Promise.all([loadInventory(),loadSummary()]);
 $('#targetRefresh').onclick = loadTargets;
 $('#clearLog').onclick = () => $('#log').textContent='';

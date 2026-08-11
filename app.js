@@ -624,8 +624,7 @@ async function clickConfirmButton(page, stockId) {
     });
 
     sendLog(`확인 버튼 클릭 완료: stockId=${stockId}`);
-
-    await waitWithStop(page, 3000);
+    await confirmButton.waitFor({ state: 'hidden', timeout: 15000 });
 }
 
 async function safeFillPrice(page, priceInput, newPrice, stockId) {
@@ -636,10 +635,9 @@ async function safeFillPrice(page, priceInput, newPrice, stockId) {
     await priceInput.click({ timeout: 5000 });
     await page.keyboard.press('Control+A');
     await page.keyboard.press('Backspace');
-    await waitWithStop(page, 300);
     await priceInput.fill('');
     await priceInput.type(priceText, { delay: 30 });
-    await waitWithStop(page, 700);
+    await waitWithStop(page, 100);
 
     const inputValue = await priceInput.inputValue().catch(() => '');
     const inputNumber = parsePrice(inputValue);
@@ -660,8 +658,6 @@ async function applyStockEdit(page, stockId, newPrice) {
 
     sendLog(`가격 수정 시작: stockId=${stockId}, newPrice=${formatPrice(newPrice)}`);
 
-    await waitWithStop(page, 2000);
-
     const priceInput = page.locator('input[name^="items."][name$=".price"]').first();
 
     await priceInput.waitFor({
@@ -680,8 +676,6 @@ async function applyStockEdit(page, stockId, newPrice) {
     sendLog(`판매 희망가 입력 완료: ${formatPrice(newPrice)}`);
 
     const submitButton = page.locator('button:has-text("재고 입력")').last();
-
-    await waitWithStop(page, 1000);
 
     await submitButton.waitFor({
         state: 'visible',
@@ -720,7 +714,7 @@ async function applyStockEdit(page, stockId, newPrice) {
     sendLog(`가격 수정 최종 완료: stockId=${stockId}`);
 }
 
-async function openKreamStockEdit(stockId, newPrice) {
+async function openKreamStockEdit(stockId, newPrice, existingContext = null) {
     checkStop();
 
     if (!stockId) {
@@ -736,8 +730,9 @@ async function openKreamStockEdit(stockId, newPrice) {
     sendLog(`재고 수정 페이지 열기 시작: stockId=${stockId}`);
     sendLog(`웹 표 기준 입력 가격: ${formatPrice(targetPrice)}`);
 
-    currentBrowser = await chromium.connectOverCDP('http://127.0.0.1:9222');
-    const context = currentBrowser.contexts()[0];
+    const connectionStartedAt = Date.now();
+    if (!existingContext) currentBrowser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+    const context = existingContext || currentBrowser.contexts()[0];
 
     if (!context) {
         throw new Error('연결된 크롬 컨텍스트 없음. 크롬 원격 디버깅을 먼저 켜야 함.');
@@ -746,14 +741,15 @@ async function openKreamStockEdit(stockId, newPrice) {
     currentPage = await context.newPage();
 
     try {
+        const itemStartedAt = Date.now();
         checkStop();
 
+        const navigationStartedAt = Date.now();
         await currentPage.goto('https://partner.kream.co.kr/business/ask-sales', {
             waitUntil: 'domcontentloaded',
             timeout: 60000
         });
-
-        await waitWithStop(currentPage, 2000);
+        const navigationMs = Date.now() - navigationStartedAt;
 
         const searchInputCandidates = [
             'input[placeholder*="검색"]',
@@ -784,7 +780,6 @@ async function openKreamStockEdit(stockId, newPrice) {
 
         if (searched) {
             sendLog(`stockId 검색 시도 완료: ${stockId}`);
-            await waitWithStop(currentPage, 3000);
         } else {
             sendLog('검색창을 못 찾아서 현재 목록에서 stockId 직접 탐색');
         }
@@ -793,10 +788,12 @@ async function openKreamStockEdit(stockId, newPrice) {
 
         const stockText = currentPage.getByText(String(stockId), { exact: true }).first();
 
+        const searchStartedAt = Date.now();
         await stockText.waitFor({
             state: 'visible',
             timeout: 15000
         });
+        const searchMs = Date.now() - searchStartedAt;
 
         sendLog(`stockId 화면 확인 완료: ${stockId}`);
 
@@ -812,13 +809,17 @@ async function openKreamStockEdit(stockId, newPrice) {
 
         checkStop();
 
+        const editOpenStartedAt = Date.now();
         await clickRealRowEditButton(currentPage, row, stockId);
 
         sendLog(`해당 행 재고 수정 버튼 클릭 완료: ${stockId}`);
 
         checkStop();
 
+        const applyStartedAt = Date.now();
         await applyStockEdit(currentPage, stockId, targetPrice);
+        const applyMs = Date.now() - applyStartedAt;
+        sendLog(`[가격수정 계측] stockId=${stockId} CDP=${((Date.now() - connectionStartedAt - (Date.now() - itemStartedAt)) / 1000).toFixed(2)}초 페이지진입=${(navigationMs / 1000).toFixed(2)}초 검색=${(searchMs / 1000).toFixed(2)}초 수정화면=${((applyStartedAt - editOpenStartedAt) / 1000).toFixed(2)}초 입력·저장확인=${(applyMs / 1000).toFixed(2)}초 총=${((Date.now() - itemStartedAt) / 1000).toFixed(2)}초`);
 
     } finally {
         if (currentPage) {
@@ -1008,6 +1009,11 @@ async function executePriceUpdates(items, context) {
     resetStop();
     let success = 0;
     let failure = 0;
+    const startedAt = Date.now();
+    sendLog(`[속도 설정] 가격 수정 동시 처리: 1 (저장 안정성 우선)`);
+    currentBrowser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+    const browserContext = currentBrowser.contexts()[0];
+    if (!browserContext) throw new Error('연결된 크롬 컨텍스트 없음. 크롬 원격 디버깅을 먼저 켜야 함.');
     context.reportProgress({ current: 0, total: items.length, percent: 0, step: '판매가 수정 준비', etaKey: 'price-update', message: `가격 수정 ${items.length}개 시작` });
     for (let index = 0; index < items.length; index++) {
         context.throwIfCancellationRequested();
@@ -1020,7 +1026,7 @@ async function executePriceUpdates(items, context) {
             message: `${index + 1}/${items.length} · stockId ${stockId} 판매가 수정 중`
         });
         try {
-            await openKreamStockEdit(stockId, newPrice);
+            await openKreamStockEdit(stockId, newPrice, browserContext);
             inventoryDb.markUpdate(stockId, 'COMPLETED', null, newPrice);
             success++;
             sendLog(`가격 수정 완료: stockId=${stockId}`);
@@ -1038,6 +1044,9 @@ async function executePriceUpdates(items, context) {
             message: `${index + 1}/${items.length} · stockId ${stockId} 가격 수정 완료`
         });
     }
+    const elapsedSeconds = (Date.now() - startedAt) / 1000;
+    sendLog(`[가격수정 요약] 총 상품=${items.length} 실제 수정=${success} 실패=${failure} 총=${elapsedSeconds.toFixed(2)}초 평균=${items.length ? (elapsedSeconds / items.length).toFixed(2) : '0.00'}초/건`);
+    currentBrowser = null;
     sendSpecial('__INVENTORY_REFRESH__');
     return { total: items.length, success, failure };
 }

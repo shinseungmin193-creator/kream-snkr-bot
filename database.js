@@ -76,16 +76,21 @@ function upsertInventory(items, complete = true) {
   return { success, failure };
 }
 
-function listInventory(query = {}) {
-  const page = Math.max(1, Number(query.page) || 1), pageSize = Math.min(100, Math.max(5, Number(query.pageSize) || 10));
+function inventoryFilter(query = {}) {
   const clauses = [], params = {};
   if (query.search) { clauses.push('(productName LIKE :search OR optionName LIKE :search OR stockId LIKE :search)'); params.search=`%${query.search}%`; }
   if (query.status) { clauses.push('(saleStatus=:status OR compareStatus=:status OR updateStatus=:status)'); params.status=query.status; }
   if (query.category) { clauses.push('category=:category'); params.category=query.category; }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+function listInventory(query = {}) {
+  const page = Math.max(1, Number(query.page) || 1), pageSize = Math.min(100, Math.max(5, Number(query.pageSize) || 10));
+  const { where, params } = inventoryFilter(query);
   const total = db.prepare(`SELECT COUNT(*) count FROM inventory_items ${where}`).get(params).count;
   const items = db.prepare(`SELECT * FROM inventory_items ${where} ORDER BY id DESC LIMIT :limit OFFSET :offset`).all({...params,limit:pageSize,offset:(page-1)*pageSize});
-  return { items, total, page, pageSize, pages: Math.max(1, Math.ceil(total/pageSize)) };
+  const stockIds = db.prepare(`SELECT stockId FROM inventory_items ${where} ORDER BY id DESC`).all(params).map(item => String(item.stockId));
+  return { items, stockIds, total, page, pageSize, pages: Math.max(1, Math.ceil(total/pageSize)) };
 }
 
 const TARGET_WHERE = "saleStatus='ON_SALE' AND compareStatus IN ('NEEDS_UPDATE','NO_FLOOR') AND targetPrice>0 AND targetPrice!=currentPrice";

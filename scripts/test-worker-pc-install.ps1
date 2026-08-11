@@ -13,6 +13,12 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) "KREAMBOT-worker-install-test-$
 $sourceRepository = Join-Path $testRoot 'source'
 $bareRepository = Join-Path $testRoot 'remote.git'
 $installRoot = Join-Path $testRoot 'worker'
+$emptyInstallRoot = Join-Path $testRoot 'empty worker'
+$preservedInstallRoot = Join-Path $testRoot 'preserved worker'
+$quotedInstallRoot = Join-Path $testRoot 'quoted worker'
+$trailingInstallRoot = Join-Path $testRoot 'trailing worker'
+$programFilesAssets = Join-Path $testRoot 'Program Files\KREAM BOT Installer\installer-assets'
+$bootstrapInstallRoot = Join-Path $testRoot 'bootstrap worker'
 $results = [Collections.Generic.List[object]]::new()
 
 function Add-TestResult {
@@ -156,6 +162,33 @@ try {
     Add-TestResult 'Chrome 전용 프로필 경로 적용' ((Get-Content -LiteralPath (Join-Path $installRoot 'KREAM_로그인_Chrome.bat') -Raw -Encoding UTF8) -match [Regex]::Escape((Join-Path $installRoot 'chrome-profile')))
     Add-TestResult '직원 PC pushurl 차단' ((Invoke-Git $installRoot @('remote', 'get-url', '--push', 'origin') -ReturnOutput) -eq 'disabled://worker-pc-push-blocked')
     Add-TestResult 'pre-push 훅 차단' (Test-Path -LiteralPath (Join-Path $installRoot '.git\hooks\pre-push'))
+
+    New-Item -ItemType Directory -Path $emptyInstallRoot -Force | Out-Null
+    $emptyInstall = Invoke-WorkerScript $installer @('-InstallPath', $emptyInstallRoot, '-TestMode', '-ChromeInstallChoice', 'No')
+    Add-TestResult '빈 C:\KREAMBOT 대응 설치' ($emptyInstall.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $emptyInstallRoot '.git')))
+
+    New-Item -ItemType Directory -Path (Join-Path $preservedInstallRoot 'data'), (Join-Path $preservedInstallRoot 'logs') -Force | Out-Null
+    Write-Utf8File (Join-Path $preservedInstallRoot 'data\preserved.test') 'preserve me'
+    $preservedInstall = Invoke-WorkerScript $installer @('-InstallPath', $preservedInstallRoot, '-TestMode', '-ChromeInstallChoice', 'No')
+    Add-TestResult 'data/logs만 존재하는 재설치' ($preservedInstall.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $preservedInstallRoot 'data\preserved.test')))
+
+    $quotedValue = '"' + $quotedInstallRoot + '"'
+    $sourceRootWithSpaces = '"' + (Join-Path $testRoot 'Source Root With Spaces') + '"'
+    $quotedInstall = Invoke-WorkerScript $installer @('-InstallPath', $quotedValue, '-SourceRoot', $sourceRootWithSpaces, '-TestMode', '-ChromeInstallChoice', 'No')
+    Add-TestResult '따옴표/공백 SourceRoot' ($quotedInstall.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $quotedInstallRoot '.git'))) $(if ($quotedInstall.ExitCode -ne 0) { $quotedInstall.Output.Trim() } else { 'PowerShell 5.1 인수 전달 성공' })
+    $trailingInstall = Invoke-WorkerScript $installer @('-TestMode', '-ChromeInstallChoice', 'No', '-InstallPath', ($trailingInstallRoot + '\'))
+    Add-TestResult '후행 백슬래시 설치 경로' ($trailingInstall.ExitCode -eq 0 -and (Test-Path -LiteralPath (Join-Path $trailingInstallRoot '.git'))) $(if ($trailingInstall.ExitCode -ne 0) { $trailingInstall.Output.Trim() } else { '정규화 성공' })
+
+    New-Item -ItemType Directory -Path $programFilesAssets -Force | Out-Null
+    $bootstrapCopy = Join-Path $programFilesAssets 'install-bootstrap.ps1'
+    $workerCopy = Join-Path $programFilesAssets 'install-worker-pc.ps1'
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'installer\install-bootstrap.ps1') -Destination $bootstrapCopy -Force
+    Copy-Item -LiteralPath $installer -Destination $workerCopy -Force
+    $bootstrapLatest = Invoke-WorkerScript $bootstrapCopy @('-InstallPath', $bootstrapInstallRoot, '-WorkerScript', $workerCopy, '-ReinstallMode', 'Latest', '-TestMode')
+    Add-TestResult 'Program Files 경로 WorkerScript + Latest' ($bootstrapLatest.ExitCode -eq 0 -and $bootstrapLatest.Output -match [Regex]::Escape("WorkerScript: $workerCopy"))
+    Add-TestResult '실제 bootstrap installer-assets를 SourceRoot로 미전달' ($bootstrapLatest.Output -notmatch 'SourceRoot')
+    $bootstrapRepair = Invoke-WorkerScript $bootstrapCopy @('-InstallPath', $bootstrapInstallRoot, '-WorkerScript', $workerCopy, '-ReinstallMode', 'Repair', '-TestMode')
+    Add-TestResult 'Program Files 경로 WorkerScript + Repair' ($bootstrapRepair.ExitCode -eq 0 -and $bootstrapRepair.Output -match 'ReinstallMode: Repair')
 
     $dbPath = Join-Path $installRoot 'data\kream-bot.db'
     $settingsPath = Join-Path $installRoot 'data\system-settings.json'

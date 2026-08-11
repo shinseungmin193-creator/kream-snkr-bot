@@ -43,6 +43,18 @@ function Write-InstallMessage {
     }
 }
 
+function Write-DetailedInstallException {
+    param([System.Management.Automation.ErrorRecord]$ErrorRecord)
+    foreach ($detail in @(
+        "Exception.Message: $($ErrorRecord.Exception.Message)",
+        "Exception.GetType().FullName: $($ErrorRecord.Exception.GetType().FullName)",
+        "InvocationInfo.ScriptName: $($ErrorRecord.InvocationInfo.ScriptName)",
+        "InvocationInfo.ScriptLineNumber: $($ErrorRecord.InvocationInfo.ScriptLineNumber)",
+        "InvocationInfo.PositionMessage: $($ErrorRecord.InvocationInfo.PositionMessage)",
+        "ScriptStackTrace: $($ErrorRecord.ScriptStackTrace)"
+    )) { Write-InstallMessage $detail 'ERROR' }
+}
+
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -277,7 +289,11 @@ function Initialize-OrUpdateRepository {
     $expectedOrigin = Get-ExpectedRepositoryOrigin
     $gitDirectory = Join-Path $script:InstallRoot '.git'
     if (-not (Test-Path -LiteralPath $script:InstallRoot)) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $script:InstallRoot) -Force | Out-Null
+        $installParent = [IO.Path]::GetDirectoryName($script:InstallRoot)
+        if ([string]::IsNullOrWhiteSpace($installParent)) {
+            throw "설치 경로의 부모 폴더를 계산할 수 없습니다: $script:InstallRoot"
+        }
+        [IO.Directory]::CreateDirectory($installParent) | Out-Null
     }
 
     if (-not (Test-Path -LiteralPath $gitDirectory -PathType Container)) {
@@ -765,6 +781,8 @@ function Invoke-WorkerInstall {
     $script:InstallRoot = Resolve-SafeInstallPath $InstallPath
     $script:LogPath = $null
     Write-InstallMessage "설치 대상 경로: $script:InstallRoot"
+    Write-InstallMessage "설치 경로 루트: $([IO.Path]::GetPathRoot($script:InstallRoot))"
+    Write-InstallMessage "설치 경로 부모: $([IO.Path]::GetDirectoryName($script:InstallRoot))"
 
     Ensure-CoreTools
     Ensure-Chrome
@@ -806,8 +824,7 @@ try {
     Invoke-WorkerInstall
     exit 0
 } catch {
-    $message = $_.Exception.Message
-    Write-InstallMessage $message 'ERROR'
+    Write-DetailedInstallException $_
     if ($script:InstallRoot -and (Test-Path -LiteralPath $script:InstallRoot)) {
         try { Complete-InstallMarker 'failed' } catch {}
     }
